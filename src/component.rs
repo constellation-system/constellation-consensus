@@ -133,7 +133,8 @@ pub struct PartyRoundIdx(usize);
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StringPrincipalCodec;
 
-// XXX this is temporary, and will be replaced with a random number stream.
+// ISSUE #2: this is temporary, and will be replaced with a random
+// number stream.
 pub struct AscendingCount {
     curr: u128
 }
@@ -299,6 +300,8 @@ struct NotifyContent {
     cond: Condvar,
     flag: Mutex<bool>
 }
+
+// ISSUE #4: replace this, or move it out to common.
 
 #[derive(Clone)]
 pub(crate) struct Notify(Arc<NotifyContent>);
@@ -544,7 +547,7 @@ where
         let (self_party, prin_codec_param, slots_config, parties_config) =
             multicast_config.take();
 
-        // XXX get the codec config properly
+        // ISSUE #5: get the codec config properly
         let msg_codec = match MsgCodec::create(MsgCodec::Param::default()) {
             Ok(codec) => codec,
             Err(err) => {
@@ -905,7 +908,8 @@ impl Standalone
         };
         let (listener, reporter) = ThreadedFlowsListener::new();
 
-        // XXX This part is temporary, until we get a real authenticator.
+        // ISSUE #6: This part is temporary, until we get a real
+        // authenticator.
         let multicast_config = consensus_config.multicast();
         let parties_config = multicast_config.parties();
 
@@ -1109,7 +1113,7 @@ impl Display for ConsensusComponentRunError {
     }
 }
 
-// XXX Delete from here
+// ISSUE #2, ISSUE #6: Delete from here
 
 impl Iterator for AscendingCount {
     type Item = u128;
@@ -1185,4 +1189,4 @@ impl Display for TestCred {
     }
 }
 
-// XXX to here
+// ISSUE #2, ISSUE #6: to here

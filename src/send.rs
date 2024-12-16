@@ -859,7 +859,7 @@ where
         stream: Stream,
         shutdown: ShutdownFlag
     ) -> Self {
-        // XXX do size hinting.
+        // ISSUE #8: do size hinting.
         SendThread {
             oper: PhantomData,
             round_id: PhantomData,
@@ -883,7 +883,7 @@ where
         debug!(target: "consensus-component-send-thread",
                "fetching new outbound messages");
 
-        // XXX figure out a good size hint here.
+        // ISSUE #8: figure out a good size hint here.
         let mut group_map = HashMap::new();
 
         let next = match self.rounds.collect_outbound(|parties_map, group| {
