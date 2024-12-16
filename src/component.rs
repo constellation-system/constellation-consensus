@@ -658,6 +658,10 @@ where
                     Ok(parties) => {
                         StaticParties::from_parties(parties.map(|(idx, _)| idx))
                     }
+                    // This is here as a placeholder; this type is
+                    // uninhabited, and Rust > 1.81 clippy generates an error
+                    // for this.
+                    Err(_) => panic!("Impossible case!")
                 };
 
                 (stream, parties)
@@ -688,8 +692,18 @@ where
 
                 party_data
             }
+            // This is here as a placeholder; this type is
+            // uninhabited, and Rust > 1.81 clippy generates an error
+            // for this.
+            Err(_) => panic!("Impossible case!")
         };
-        let Ok(party_iter) = stream.parties();
+        let party_iter = match stream.parties() {
+            Ok(party_iter) => party_iter,
+            // This is here as a placeholder; this type is
+            // uninhabited, and Rust > 1.81 clippy generates an error
+            // for this.
+            Err(_) => panic!("Impossible case!")
+        };
         let proto: SharedConsensusProto<
             Proto,
             RoundIDs,
