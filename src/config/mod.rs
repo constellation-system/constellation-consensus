@@ -272,6 +272,95 @@ impl StandaloneConfig {
     }
 }
 
+#[cfg(test)]
+use constellation_common::net::IPEndpoint;
+#[cfg(test)]
+use constellation_common::net::IPEndpointAddr;
+#[cfg(test)]
+use constellation_common::retry::Retry;
+#[cfg(test)]
+use constellation_streams::config::ConnectionConfig;
+#[cfg(test)]
+use constellation_streams::config::FarSchedulerConfig;
+
+#[test]
+fn test_connection_config() {
+    let yaml = concat!(
+        "channel-names:\n",
+        "  - \"chan-1\"\n",
+        "  - \"chan-2\"\n",
+        "endpoints:\n",
+        "  - ip:\n",
+        "      addr: localhost\n",
+        "      port: 10000\n",
+    );
+    let channames = vec!["chan-1", "chan-2"];
+    let endpoint = CompoundEndpoint::IP {
+        ip: IPEndpoint::new(IPEndpointAddr::name(String::from("localhost")),
+                            10000)
+    };
+    let endpoints = vec![endpoint];
+    let expected = ConnectionConfig::new((), channames, endpoints);
+    let actual = serde_yaml::from_str(yaml).unwrap();
+
+    assert_eq!(expected, actual);
+}
+
+#[test]
+fn test_party_config() {
+    let yaml = concat!(
+        "retry:\n",
+        "  factor: 100\n",
+        "  exp-base: 2.0\n",
+        "  exp-factor: 1.0\n",
+        "  exp-rounds-cap: 20\n",
+        "  linear-factor: 1.0\n",
+        "  linear-rounds-cap: 50\n",
+        "  max-random: 100\n",
+        "  addend: 50\n",
+        "connections:\n",
+        "  - channel-names:\n",
+        "      - \"chan-1\"\n",
+        "      - \"chan-2\"\n",
+        "    endpoints:\n",
+        "      - ip:\n",
+        "          addr: localhost\n",
+        "          port: 10000\n",
+        "  - channel-names:\n",
+        "      - \"chan-2\"\n",
+        "    endpoints:\n",
+        "      - ip:\n",
+        "          addr: localhost\n",
+        "          port: 9999\n",
+    );
+    let retry = Retry::new(100, 2.0, 1.0, 20, 1.0, Some(50), 100, 50);
+    let addr_10000 = CompoundEndpoint::IP {
+        ip: IPEndpoint::new(IPEndpointAddr::name(String::from("localhost")),
+                            10000)
+    };
+    let channames_10000 = vec!["chan-1", "chan-2"];
+    let endpoints_10000 = vec![addr_10000];
+    let connection_10000 = ConnectionConfig::new(
+        (), channames_10000, endpoints_10000
+    );
+    let addr_9999 = CompoundEndpoint::IP {
+        ip: IPEndpoint::new(IPEndpointAddr::name(String::from("localhost")),
+                            9999)
+    };
+    let channames_9999 = vec!["chan-2"];
+    let endpoints_9999 = vec![addr_9999];
+    let connection_9999 = ConnectionConfig::new(
+        (), channames_9999, endpoints_9999
+    );
+    let connections = vec![connection_10000, connection_9999];
+    let expected = PartyConfig::new(
+        FarSchedulerConfig::default(), (), retry, connections, None
+    );
+    let actual = serde_yaml::from_str(yaml).unwrap();
+
+    assert_eq!(expected, actual);
+}
+
 // #[test]
 // fn test_party_config() {
 // let yaml = concat!(
