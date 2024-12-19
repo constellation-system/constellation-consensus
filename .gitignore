@@ -14,3 +14,4 @@ src/generated/*
 
 test/data/certs/client
 test/data/certs/server
+test/configs

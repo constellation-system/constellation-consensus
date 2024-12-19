@@ -16,19 +16,10 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-//! Consensus component for the Constellation distributed systems platform.
-//!
-//! This crate provides an embeddable consensus component that type
-//! that can be instantiated within a larger application.
-#![feature(generic_const_exprs)]
-#![feature(let_chains)]
-#![allow(incomplete_features)]
-#![allow(clippy::redundant_field_names)]
-#![allow(clippy::type_complexity)]
+//! Standalone consensus component.
+use constellation_consensus::component::CompoundConsensusComponent;
+use constellation_standalone::Standalone;
 
-pub mod component;
-pub mod config;
-
-mod poll;
-mod send;
-mod state;
+fn main() {
+    CompoundConsensusComponent::main()
+}

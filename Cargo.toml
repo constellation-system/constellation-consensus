@@ -19,6 +19,7 @@
 [package]
 name = "constellation-consensus"
 description = "Consensus component for the Constellation distributed systems platform"
+repository = "https://github.com/constellation-system/constellation-consensus"
 version = "0.0.0"
 authors = [ "Eric McCorkle <eric.mccorkle@jhuapl.edu>" ]
 rust-version = "1.81"
@@ -29,3 +30,52 @@ exclude = [
     ".gitignore"
 ]
 edition = "2018"
+
+[[bin]]
+name = "constellation-consensus"
+required-features = ["standalone"]
+
+[features]
+default = ["dtls", "log", "openssl", "socks5", "standalone", "tls", "unix"]
+dtls = ["constellation-channels/dtls"]
+gssapi = ["constellation-auth/gssapi",
+          "constellation-channels/gssapi",
+          "constellation-common/gssapi",
+          "constellation-consensus-common/gssapi",
+          "constellation-streams/gssapi"]
+log = ["dep:log",
+       "constellation-auth/log",
+       "constellation-channels/log",
+       "constellation-common/log",
+       "constellation-consensus-common/log",
+       "constellation-pbft/log",
+       "constellation-standalone?/log",
+       "constellation-streams/log"]
+openssl = ["constellation-auth/openssl",
+           "constellation-channels/openssl",
+           "constellation-common/openssl",
+           "constellation-consensus-common/openssl",
+           "constellation-streams/openssl"]
+socks5 = ["constellation-channels/socks5"]
+standalone = ["dep:constellation-standalone",
+              "dep:constellation-pbft"]
+tls = ["constellation-channels/tls"]
+unix = ["constellation-auth/unix",
+        "constellation-channels/unix",
+        "constellation-common/unix",
+        "constellation-streams/unix"]
+
+[dependencies]
+constellation-auth = { git = "https://github.com/constellation-system/constellation-auth.git", branch = "devel", default-features = false }
+constellation-channels = { git = "https://github.com/constellation-system/constellation-channels.git", branch = "devel", default-features = false }
+constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "devel", default-features = false }
+constellation-consensus-common = { git = "https://github.com/constellation-system/constellation-consensus-common.git", branch = "devel", default-features = false }
+constellation-pbft = { git = "https://github.com/constellation-system/constellation-pbft.git", branch = "devel", default-features = false, optional = true }
+constellation-standalone = { git = "https://github.com/constellation-system/constellation-standalone.git", branch = "devel", default-features = false, optional = true }
+constellation-streams = { git = "https://github.com/constellation-system/constellation-streams.git", branch = "devel", default-features = false }
+log = { version = "0.4", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+env_logger = { version = "0.10" }
+serde_yaml = { version = "0.9" }
