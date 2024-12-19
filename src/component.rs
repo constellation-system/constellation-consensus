@@ -28,7 +28,6 @@ use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::str::from_utf8;
 use std::str::Utf8Error;
-#[cfg(feature = "standalone")]
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
