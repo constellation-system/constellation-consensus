@@ -29,10 +29,7 @@ use std::net::SocketAddr;
 use std::str::from_utf8;
 use std::str::Utf8Error;
 use std::sync::Arc;
-use std::sync::Condvar;
-use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
@@ -70,7 +67,6 @@ use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
 use constellation_channels::unix::UnixSocketAddr;
 use constellation_common::codec::DatagramCodec;
-use constellation_common::error::MutexPoison;
 use constellation_common::net::DatagramXfrm;
 use constellation_common::net::DatagramXfrmCreate;
 use constellation_common::net::DatagramXfrmCreateParam;
@@ -78,6 +74,7 @@ use constellation_common::net::IPEndpointAddr;
 use constellation_common::net::Socket;
 use constellation_common::sched::DenseItemID;
 use constellation_common::shutdown::ShutdownFlag;
+use constellation_common::sync::Notify;
 use constellation_consensus_common::parties::StaticParties;
 use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoRounds;
@@ -295,78 +292,7 @@ pub struct ConsensusComponentCleanup {
     state_join: JoinHandle<()>
 }
 
-struct NotifyContent {
-    cond: Condvar,
-    flag: Mutex<bool>
-}
-
-// ISSUE #4: replace this, or move it out to common.
-
-#[derive(Clone)]
-pub(crate) struct Notify(Arc<NotifyContent>);
-
 pub struct ConsensusComponentRunError;
-
-impl Notify {
-    #[inline]
-    fn new() -> Self {
-        Notify(Arc::new(NotifyContent {
-            cond: Condvar::new(),
-            flag: Mutex::new(false)
-        }))
-    }
-
-    pub(crate) fn set(&self) -> Result<(), MutexPoison> {
-        let mut guard = self.0.flag.lock().map_err(|_| MutexPoison)?;
-
-        *guard = true;
-        self.0.cond.notify_all();
-
-        Ok(())
-    }
-
-    pub(crate) fn wait_timeout(
-        &self,
-        timeout: Duration
-    ) -> Result<bool, MutexPoison> {
-        let mut guard = self.0.flag.lock().map_err(|_| MutexPoison)?;
-
-        if *guard {
-            *guard = false;
-
-            Ok(true)
-        } else {
-            let mut guard = self
-                .0
-                .cond
-                .wait_timeout(guard, timeout)
-                .map_err(|_| MutexPoison)?
-                .0;
-            let out = *guard;
-
-            *guard = false;
-
-            Ok(out)
-        }
-    }
-
-    pub(crate) fn wait(&self) -> Result<bool, MutexPoison> {
-        let mut guard = self.0.flag.lock().map_err(|_| MutexPoison)?;
-
-        if *guard {
-            *guard = false;
-
-            Ok(true)
-        } else {
-            let mut guard = self.0.cond.wait(guard).map_err(|_| MutexPoison)?;
-            let out = *guard;
-
-            *guard = false;
-
-            Ok(out)
-        }
-    }
-}
 
 impl From<usize> for PartyStreamIdx {
     #[inline]
@@ -794,7 +720,7 @@ impl ConsensusComponentCleanup {
     pub fn cleanup(mut self) {
         self.shutdown.set();
 
-        if let Err(err) = self.notify.set() {
+        if let Err(err) = self.notify.notify() {
             error!(target: "consensus-component-cleanup",
                    "error notifying sender: {}",
                    err)
