@@ -66,13 +66,13 @@ unix = ["constellation-auth/unix",
         "constellation-streams/unix"]
 
 [dependencies]
-constellation-auth = { git = "https://github.com/constellation-system/constellation-auth.git", branch = "devel", default-features = false }
-constellation-channels = { git = "https://github.com/constellation-system/constellation-channels.git", branch = "devel", default-features = false }
-constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "devel", default-features = false }
-constellation-consensus-common = { git = "https://github.com/constellation-system/constellation-consensus-common.git", branch = "devel", default-features = false }
-constellation-pbft = { git = "https://github.com/constellation-system/constellation-pbft.git", branch = "devel", default-features = false, optional = true }
-constellation-standalone = { git = "https://github.com/constellation-system/constellation-standalone.git", branch = "devel", default-features = false, optional = true }
-constellation-streams = { git = "https://github.com/constellation-system/constellation-streams.git", branch = "devel", default-features = false }
+constellation-auth = { path = "../constellation-auth/", default-features = false }
+constellation-channels = { path = "../constellation-channels/", default-features = false }
+constellation-common = { path = "../constellation-common/", default-features = false }
+constellation-consensus-common = { path = "../constellation-consensus-common/", default-features = false }
+constellation-pbft = { path = "../constellation-pbft/", default-features = false, optional = true }
+constellation-standalone = { path = "../constellation-standalone/", default-features = false, optional = true }
+constellation-streams = { path = "../constellation-streams/", default-features = false }
 log = { version = "0.4", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 
