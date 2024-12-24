@@ -1010,7 +1010,7 @@ where
                                 if notify {
                                     next_outbound = Some(now)
                                 }
-                            },
+                            }
                             Err(err) => {
                                 error!(target: "consensus-component-send-thread",
                                        "error waiting for notification: {}",
