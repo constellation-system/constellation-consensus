@@ -26,6 +26,7 @@ use std::thread::spawn;
 use std::thread::JoinHandle;
 
 use constellation_common::shutdown::ShutdownFlag;
+use constellation_common::sync::Notify;
 use constellation_consensus_common::outbound::Outbound;
 use constellation_consensus_common::round::RoundMsg;
 use constellation_consensus_common::round::Rounds;
@@ -34,7 +35,6 @@ use log::debug;
 use log::error;
 use log::info;
 
-use crate::component::Notify;
 use crate::component::PartyStreamIdx;
 
 pub(crate) struct StateThread<R, RoundID, Msg, Oper, Out>
@@ -112,7 +112,7 @@ where
                                 valid = false;
                             }
 
-                            if let Err(err) = self.notify.set() {
+                            if let Err(err) = self.notify.notify() {
                                 error!(target: "consensus-component-state-thread",
                                        "error notifying sender: {}",
                                        err);

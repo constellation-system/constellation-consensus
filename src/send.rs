@@ -28,6 +28,7 @@ use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_common::retry::RetryResult;
 use constellation_common::retry::RetryWhen;
 use constellation_common::shutdown::ShutdownFlag;
+use constellation_common::sync::Notify;
 use constellation_consensus_common::outbound::Outbound;
 use constellation_consensus_common::parties::PartiesMap;
 use constellation_consensus_common::round::RoundMsg;
@@ -45,7 +46,6 @@ use log::error;
 use log::info;
 use log::trace;
 
-use crate::component::Notify;
 use crate::component::PartyStreamIdx;
 
 enum SendEntry<Msg, Stream, Ctx>
@@ -1026,11 +1026,7 @@ where
                            "waiting for notification indefinitely");
 
                     match self.notify.wait() {
-                        Ok(notify) => {
-                            if notify {
-                                next_outbound = Some(now)
-                            }
-                        }
+                        Ok(_) => next_outbound = Some(now),
                         Err(err) => {
                             error!(target: "consensus-component-send-thread",
                                    "error waiting for notification: {}",

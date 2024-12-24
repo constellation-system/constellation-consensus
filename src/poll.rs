@@ -25,6 +25,7 @@ use std::thread::spawn;
 use std::thread::JoinHandle;
 
 use constellation_common::shutdown::ShutdownFlag;
+use constellation_common::sync::Notify;
 use constellation_consensus_common::outbound::Outbound;
 use constellation_consensus_common::parties::PartiesMap;
 use constellation_consensus_common::round::RoundMsg;
@@ -36,7 +37,6 @@ use log::error;
 use log::info;
 use log::warn;
 
-use crate::component::Notify;
 use crate::component::PartyStreamIdx;
 
 pub(crate) struct PollThread<
@@ -86,7 +86,7 @@ where
     Prin: Display + Eq + Hash + Send
 {
     fn drop(&mut self) {
-        if let Err(err) = self.notify.set() {
+        if let Err(err) = self.notify.notify() {
             error!(target: "consensus-component-poll-thread",
                    "error notifying sender: {}",
                    err);
@@ -151,7 +151,7 @@ where
                                   prin, err)
                         }
 
-                        if let Err(err) = self.notify.set() {
+                        if let Err(err) = self.notify.notify() {
                             error!(target: "consensus-component-poll-thread",
                                    "error notifying sender: {}",
                                    err);
