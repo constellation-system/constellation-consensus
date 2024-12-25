@@ -71,6 +71,7 @@ use constellation_common::net::DatagramXfrm;
 use constellation_common::net::DatagramXfrmCreate;
 use constellation_common::net::DatagramXfrmCreateParam;
 use constellation_common::net::IPEndpointAddr;
+use constellation_common::net::SharedMsgs;
 use constellation_common::net::Socket;
 use constellation_common::sched::DenseItemID;
 use constellation_common::shutdown::ShutdownFlag;
@@ -95,6 +96,7 @@ use constellation_streams::multicast::StreamMulticaster;
 use constellation_streams::select::StreamSelector;
 use constellation_streams::stream::pull::PullStreams;
 use constellation_streams::stream::pull::PullStreamsReporter;
+use constellation_streams::stream::push::PushStreamSharedThread;
 use constellation_streams::stream::ConcurrentStream;
 use constellation_streams::stream::PushStreamParties;
 use constellation_streams::stream::PushStreamReporter;
@@ -109,7 +111,6 @@ use crate::config::PartiesConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
 use crate::poll::PollThread;
-use crate::send::SendThread;
 use crate::state::StateThread;
 
 /// Index used to identify principals in the stream.
@@ -364,7 +365,7 @@ where
     <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper:
         'static + Send,
     Proto::Msg: 'static + Clone + Debug + Send,
-    Proto::Rounds: 'static + Send,
+    Proto::Rounds: 'static + Send + SharedMsgs<PartyStreamIdx, Proto::Msg>,
     Proto::Out: 'static + Send,
     MsgCodec: 'static + Clone + DatagramCodec<Proto::Msg> + Send,
     <MsgCodec as DatagramCodec<Proto::Msg>>::Param: Default,
@@ -686,22 +687,14 @@ where
             shutdown.clone()
         );
         let poll_join = poll.start();
-        let sender: SendThread<
-            SharedRounds<Proto::Rounds, _, _, _, _, _>,
-            _,
-            StaticParties<PartyStreamIdx>,
-            _,
-            _,
-            _,
-            _,
-            _
-        > = SendThread::create(
-            ctx,
-            rounds,
-            notify.clone(),
-            stream,
-            shutdown.clone()
-        );
+        let sender: PushStreamSharedThread<_, _, _, _> =
+            PushStreamSharedThread::create(
+                ctx,
+                rounds,
+                notify.clone(),
+                stream,
+                shutdown.clone()
+            );
         let notify = sender.notify();
         let sender_join = sender.start();
 
