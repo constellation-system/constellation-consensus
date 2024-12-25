@@ -687,18 +687,14 @@ where
             shutdown.clone()
         );
         let poll_join = poll.start();
-        let sender: PushStreamSharedThread<
-            _,
-            _,
-            _,
-            _
-        > = PushStreamSharedThread::create(
-            ctx,
-            rounds,
-            notify.clone(),
-            stream,
-            shutdown.clone()
-        );
+        let sender: PushStreamSharedThread<_, _, _, _> =
+            PushStreamSharedThread::create(
+                ctx,
+                rounds,
+                notify.clone(),
+                stream,
+                shutdown.clone()
+            );
         let notify = sender.notify();
         let sender_join = sender.start();
 
