@@ -29,5 +29,4 @@
 pub mod component;
 pub mod config;
 
-mod poll;
 mod state;

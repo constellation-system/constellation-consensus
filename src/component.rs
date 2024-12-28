@@ -16,6 +16,7 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::convert::TryFrom;
 use std::fmt::Debug;
@@ -29,8 +30,10 @@ use std::net::SocketAddr;
 use std::str::from_utf8;
 use std::str::Utf8Error;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::thread::JoinHandle;
 
+use constellation_auth::authn::AuthNMsgRecv;
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TestAuthN;
@@ -67,6 +70,7 @@ use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
 use constellation_channels::unix::UnixSocketAddr;
 use constellation_common::codec::DatagramCodec;
+use constellation_common::error::MutexPoison;
 use constellation_common::net::DatagramXfrm;
 use constellation_common::net::DatagramXfrmCreate;
 use constellation_common::net::DatagramXfrmCreateParam;
@@ -80,10 +84,12 @@ use constellation_consensus_common::parties::StaticParties;
 use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoRounds;
 use constellation_consensus_common::proto::SharedConsensusProto;
+use constellation_consensus_common::round::RoundMsg;
 use constellation_consensus_common::round::RoundsAdvance;
+use constellation_consensus_common::round::RoundsRecv;
 use constellation_consensus_common::round::RoundsSetParties;
-use constellation_consensus_common::round::SharedRounds;
 use constellation_consensus_common::state::ProtoState;
+use constellation_consensus_common::state::RoundResultReporter;
 #[cfg(feature = "standalone")]
 use constellation_pbft::msgs::PBFTMsgPERCodec;
 #[cfg(feature = "standalone")]
@@ -112,7 +118,6 @@ use crate::config::ConsensusConfig;
 use crate::config::PartiesConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
-use crate::poll::PollThread;
 use crate::state::StateThread;
 
 /// Index used to identify principals in the stream.
@@ -136,6 +141,23 @@ pub struct StringPrincipalCodec;
 // number stream.
 pub struct AscendingCount {
     curr: u128
+}
+
+struct ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+where
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
+    RoundID: Clone + Display + Ord + Send,
+    Prin: Display + Eq + Hash + Send,
+    Msg: RoundMsg<RoundID> + Send,
+{
+    oper: PhantomData<Oper>,
+    msg: PhantomData<Msg>,
+    round_ids: PhantomData<RoundID>,
+    prins: Arc<RwLock<HashMap<Prin, PartyStreamIdx>>>,
+    reporter: Reporter,
+    notify: Notify,
+    rounds: R,
 }
 
 pub type CompoundConsensusComponent<
@@ -289,7 +311,6 @@ pub struct ConsensusComponent<
 pub struct ConsensusComponentCleanup {
     notify: Notify,
     shutdown: ShutdownFlag,
-    poll_join: JoinHandle<()>,
     sender_join: JoinHandle<()>,
     pull_join: JoinHandle<()>,
     state_join: JoinHandle<()>
@@ -322,6 +343,153 @@ impl From<PartyRoundIdx> for usize {
     #[inline]
     fn from(val: PartyRoundIdx) -> usize {
         val.0
+    }
+}
+
+unsafe impl<R, Reporter, RoundID, Prin, Oper, Msg> Send for
+    ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+where
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
+    RoundID: Clone + Display + Ord + Send,
+    Prin: Display + Eq + Hash + Send,
+    Msg: RoundMsg<RoundID> + Send {
+}
+
+unsafe impl<R, Reporter, RoundID, Prin, Oper, Msg> Sync for
+    ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+where
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
+    RoundID: Clone + Display + Ord + Send,
+    Prin: Display + Eq + Hash + Send,
+    Msg: RoundMsg<RoundID> + Send {
+}
+
+impl<R, Reporter, RoundID, Prin, Oper, Msg> Clone
+    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+where
+    R: Clone + RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    Reporter: Clone + RoundResultReporter<RoundID, Oper> + Send + Sync,
+    RoundID: Clone + Display + Ord + Send,
+    Prin: Display + Eq + Hash + Send,
+    Msg: RoundMsg<RoundID> + Send {
+    #[inline]
+    fn clone(&self) -> Self {
+        ConsensusAuthNRecv {
+            oper: self.oper,
+            msg: self.msg,
+            round_ids: self.round_ids,
+            prins: self.prins.clone(),
+            reporter: self.reporter.clone(),
+            notify: self.notify.clone(),
+            rounds: self.rounds.clone(),
+        }
+    }
+}
+
+impl<R, Reporter, RoundID, Prin, Oper, Msg>
+    ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+where
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
+    RoundID: Clone + Display + Ord + Send,
+    Prin: Display + Eq + Hash + Send,
+    Msg: RoundMsg<RoundID> + Send {
+
+    #[inline]
+    fn create(
+        reporter: Reporter,
+        rounds: R,
+        notify: Notify,
+    ) -> Self {
+        ConsensusAuthNRecv {
+            oper: PhantomData,
+            msg: PhantomData,
+            round_ids: PhantomData,
+            prins: Arc::new(RwLock::new(HashMap::new())),
+            reporter: reporter,
+            notify: notify,
+            rounds: rounds,
+        }
+    }
+
+    #[inline]
+    fn set_parties<I>(
+        &mut self,
+        prins: I,
+    ) -> Result<(), MutexPoison>
+    where
+        I: Iterator<Item = (PartyStreamIdx, Prin)> {
+        let mut guard = self
+            .prins
+            .write()
+            .map_err(|_| MutexPoison)?;
+
+        *guard = prins.map(|(a, b)| (b, a)).collect();
+
+        Ok(())
+    }
+}
+
+impl<R, Reporter, RoundID, Prin, Oper, Msg> Drop
+    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+where
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
+    RoundID: Clone + Display + Ord + Send,
+    Prin: Display + Eq + Hash + Send,
+    Msg: RoundMsg<RoundID> + Send {
+    fn drop(&mut self) {
+        if let Err(err) = self.notify.notify() {
+            error!(target: "consensus-recv-authn-msg",
+                   "error notifying sender: {}",
+                   err);
+        }
+    }
+}
+
+impl<R, Reporter, RoundID, Prin, Oper, Msg> AuthNMsgRecv<Prin, Msg>
+    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+where
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
+    RoundID: Clone + Display + Ord + Send,
+    Prin: Display + Eq + Hash + Send,
+    Msg: RoundMsg<RoundID> + Send {
+    type RecvError = MutexPoison;
+
+    /// Receive an authenticated message.
+    fn recv_auth_msg(
+        &mut self,
+        prin: &Prin,
+        msg: Msg
+    ) -> Result<(), Self::RecvError> {
+        let guard = self
+            .prins
+            .read()
+            .map_err(|_| MutexPoison)?;
+
+        match guard.get(&prin) {
+            Some(party) => {
+                if let Err(err) =
+                    self.rounds.recv(&mut self.reporter, party, msg)
+                {
+                    warn!(target: "consensus-recv-authn-msg",
+                          "error receiving message from {}: {}",
+                          prin, err)
+                }
+
+                self.notify.notify()
+            }
+            None => {
+                warn!(target: "consensus-recv-authn-msg",
+                      "discarding message from unknown principal {}",
+                      prin);
+
+                Ok(())
+            }
+        }
     }
 }
 
@@ -514,16 +682,6 @@ where
                 return Err(ConsensusComponentRunError);
             }
         };
-        let listener =
-            ThreadedFlowsPullStreamListener::create(listener, msg_codec);
-        let (pull_streams, pull_listener, receiver) =
-            PullStreams::with_capacity(
-                listener,
-                shutdown.clone(),
-                PassthruMsgAuthN::default(),
-                1
-            );
-        let stream_reporter = pull_streams.reporter();
         let mut rounds =
             match proto.rounds(round_ids) {
                 Ok(proto) => proto,
@@ -535,6 +693,25 @@ where
                     return Err(ConsensusComponentRunError);
                 }
             };
+        let notify = Notify::new();
+        let (state, round_reporter) =
+            StateThread::create(notify.clone(), shutdown.clone());
+        let mut authn_msg_recv = ConsensusAuthNRecv::create(
+            round_reporter,
+            rounds.clone(),
+            notify.clone()
+        );
+        let listener =
+            ThreadedFlowsPullStreamListener::create(listener, msg_codec);
+        let (pull_streams, pull_listener) =
+            PullStreams::with_capacity(
+                listener,
+                authn_msg_recv.clone(),
+                shutdown.clone(),
+                PassthruMsgAuthN::default(),
+                1
+            );
+        let stream_reporter = pull_streams.reporter();
 
         // Bring up the push-side.
         debug!(target: "consensus-component",
@@ -552,7 +729,7 @@ where
                         FarChannelRegistryChannels<
                             Proto::Msg,
                             MsgCodec,
-                            PullStreamsReporter<Proto::Msg, _, _, _>,
+                            PullStreamsReporter<Proto::Msg, _, _, _, _>,
                             Channel,
                             F,
                             AuthN,
@@ -596,7 +773,7 @@ where
                         FarChannelRegistryChannels<
                             Proto::Msg,
                             MsgCodec,
-                            PullStreamsReporter<Proto::Msg, _, _, _>,
+                            PullStreamsReporter<Proto::Msg, _, _, _, _>,
                             Channel,
                             F,
                             AuthN,
@@ -665,34 +842,16 @@ where
             Err(_) => panic!("Impossible case!")
         };
 
+        if let Err(err) = authn_msg_recv.set_parties(party_iter) {
+            error!("error setting parties: {}", err);
+        }
+
         debug!(target: "consensus-component",
                "starting pull listener");
 
         let stream_reporter = stream.reporter(stream_reporter);
-        let notify = Notify::new();
-        let (state, round_reporter) =
-            StateThread::create(notify.clone(), shutdown.clone());
         let state_join = state.start(rounds.clone());
         let pull_join = pull_listener.start(stream_reporter);
-        let poll: PollThread<
-            SharedRounds<Proto::Rounds, _, _, _, _, _>,
-            _,
-            PartyStreamIdx,
-            _,
-            StaticParties<PartyStreamIdx>,
-            _,
-            _,
-            _,
-            _
-        > = PollThread::create(
-            receiver,
-            round_reporter,
-            rounds.clone(),
-            notify.clone(),
-            party_iter,
-            shutdown.clone()
-        );
-        let poll_join = poll.start();
         let sender = PushStreamSharedThread::create(
             ctx,
             rounds,
@@ -706,7 +865,6 @@ where
         Ok(ConsensusComponentCleanup {
             notify: notify,
             shutdown: shutdown,
-            poll_join: poll_join,
             sender_join: sender_join,
             state_join: state_join,
             pull_join: pull_join
@@ -730,14 +888,6 @@ impl ConsensusComponentCleanup {
         if self.sender_join.join().is_err() {
             error!(target: "consensus-component-cleanup",
                    "error joining sender")
-        }
-
-        debug!(target: "consensus-component-cleanup",
-               "joining listener");
-
-        if self.poll_join.join().is_err() {
-            error!(target: "consensus-component-cleanup",
-                   "error joining polling thread")
         }
 
         debug!(target: "consensus-component-cleanup",

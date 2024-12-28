@@ -49,6 +49,15 @@ pub(crate) struct StateThreadReporter<RoundID, Oper> {
     send: Sender<(RoundID, Oper)>
 }
 
+impl<RoundID, Oper> Clone for StateThreadReporter<RoundID, Oper> {
+    #[inline]
+    fn clone(&self) -> Self {
+        StateThreadReporter {
+            send: self.send.clone()
+        }
+    }
+}
+
 impl<R, RoundID, Oper> StateThread<R, RoundID, Oper>
 where
     R: 'static + RoundsAdvance<RoundID> + RoundsUpdate<Oper> + Send,
