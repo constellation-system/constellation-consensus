@@ -27,25 +27,18 @@ use std::thread::JoinHandle;
 
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
-use constellation_consensus_common::outbound::Outbound;
-use constellation_consensus_common::round::RoundMsg;
-use constellation_consensus_common::round::Rounds;
+use constellation_consensus_common::round::RoundsAdvance;
+use constellation_consensus_common::round::RoundsUpdate;
 use constellation_consensus_common::state::RoundResultReporter;
 use log::debug;
 use log::error;
 use log::info;
 
-use crate::component::PartyStreamIdx;
-
-pub(crate) struct StateThread<R, RoundID, Msg, Oper, Out>
+pub(crate) struct StateThread<R, RoundID, Oper>
 where
-    R: Rounds<RoundID, PartyStreamIdx, Oper, Msg, Out> + Send,
-    Out: Outbound<RoundID, Msg> + Send,
-    Msg: Clone + RoundMsg<RoundID> + Send,
+    R: RoundsAdvance<RoundID> + RoundsUpdate<Oper> + Send,
     RoundID: Clone + Display + Ord + Send,
     Oper: Send {
-    msg: PhantomData<Msg>,
-    out: PhantomData<Out>,
     rounds: PhantomData<R>,
     recv: Receiver<(RoundID, Oper)>,
     shutdown: ShutdownFlag,
@@ -56,11 +49,9 @@ pub(crate) struct StateThreadReporter<RoundID, Oper> {
     send: Sender<(RoundID, Oper)>
 }
 
-impl<R, RoundID, Msg, Oper, Out> StateThread<R, RoundID, Msg, Oper, Out>
+impl<R, RoundID, Oper> StateThread<R, RoundID, Oper>
 where
-    R: 'static + Rounds<RoundID, PartyStreamIdx, Oper, Msg, Out> + Send,
-    Out: 'static + Outbound<RoundID, Msg> + Send,
-    Msg: 'static + Clone + RoundMsg<RoundID> + Send,
+    R: 'static + RoundsAdvance<RoundID> + RoundsUpdate<Oper> + Send,
     RoundID: 'static + Clone + Display + Ord + Send,
     Oper: 'static + Send
 {
@@ -72,8 +63,6 @@ where
 
         (
             StateThread {
-                msg: PhantomData,
-                out: PhantomData,
                 rounds: PhantomData,
                 notify: notify,
                 shutdown: shutdown,

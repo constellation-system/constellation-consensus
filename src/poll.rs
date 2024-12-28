@@ -26,10 +26,9 @@ use std::thread::JoinHandle;
 
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
-use constellation_consensus_common::outbound::Outbound;
 use constellation_consensus_common::parties::PartiesMap;
 use constellation_consensus_common::round::RoundMsg;
-use constellation_consensus_common::round::Rounds;
+use constellation_consensus_common::round::RoundsRecv;
 use constellation_consensus_common::state::RoundResultReporter;
 use constellation_streams::stream::PullStream;
 use log::debug;
@@ -42,28 +41,28 @@ use crate::component::PartyStreamIdx;
 pub(crate) struct PollThread<
     R,
     RoundID,
+    PartyID,
     Prin,
     P,
     Stream,
     Oper,
     Msg,
-    Out,
     Reporter
 > where
     RoundID: Clone + Display + Ord + Send,
-    R: Rounds<RoundID, PartyStreamIdx, Oper, Msg, Out> + Send,
-    P: PartiesMap<RoundID, Out::PartyID, PartyStreamIdx> + Send,
+    PartyID: Clone + From<usize> + Into<usize>,
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send,
+    P: PartiesMap<RoundID, PartyID, PartyStreamIdx> + Send,
     Reporter: RoundResultReporter<RoundID, Oper> + Send,
-    Out: Outbound<RoundID, Msg> + Send,
     Stream: PullStream<(Prin, Msg)> + Send,
     Msg: RoundMsg<RoundID> + Send,
     Prin: Display + Eq + Hash + Send,
     Oper: Send {
     oper: PhantomData<Oper>,
     round_ids: PhantomData<RoundID>,
+    party_ids: PhantomData<PartyID>,
     parties: PhantomData<P>,
     msg: PhantomData<Msg>,
-    out: PhantomData<Out>,
     reporter: Reporter,
     prins: HashMap<Prin, PartyStreamIdx>,
     notify: Notify,
@@ -72,14 +71,14 @@ pub(crate) struct PollThread<
     shutdown: ShutdownFlag
 }
 
-impl<R, RoundID, Prin, P, Stream, Oper, Msg, Out, Reporter> Drop
-    for PollThread<R, RoundID, Prin, P, Stream, Oper, Msg, Out, Reporter>
+impl<R, RoundID, PartyID, Prin, P, Stream, Oper, Msg, Reporter> Drop
+    for PollThread<R, RoundID, PartyID, Prin, P, Stream, Oper, Msg, Reporter>
 where
     RoundID: Clone + Display + Ord + Send,
-    R: Rounds<RoundID, PartyStreamIdx, Oper, Msg, Out> + Send,
-    P: PartiesMap<RoundID, Out::PartyID, PartyStreamIdx> + Send,
+    PartyID: Clone + From<usize> + Into<usize>,
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send,
+    P: PartiesMap<RoundID, PartyID, PartyStreamIdx> + Send,
     Reporter: RoundResultReporter<RoundID, Oper> + Send,
-    Out: Outbound<RoundID, Msg> + Send,
     Stream: PullStream<(Prin, Msg)> + Send,
     Msg: RoundMsg<RoundID> + Send,
     Oper: Send,
@@ -94,14 +93,14 @@ where
     }
 }
 
-impl<R, RoundID, Prin, P, Stream, Oper, Msg, Out, Reporter>
-    PollThread<R, RoundID, Prin, P, Stream, Oper, Msg, Out, Reporter>
+impl<R, RoundID, PartyID, Prin, P, Stream, Oper, Msg, Reporter>
+    PollThread<R, RoundID, PartyID, Prin, P, Stream, Oper, Msg, Reporter>
 where
     RoundID: 'static + Clone + Display + Ord + Send,
-    R: 'static + Rounds<RoundID, PartyStreamIdx, Oper, Msg, Out> + Send,
-    P: 'static + PartiesMap<RoundID, Out::PartyID, PartyStreamIdx> + Send,
+    PartyID: 'static + Clone + From<usize> + Into<usize> + Send,
+    R: 'static + RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send,
+    P: 'static + PartiesMap<RoundID, PartyID, PartyStreamIdx> + Send,
     Reporter: 'static + RoundResultReporter<RoundID, Oper> + Send,
-    Out: 'static + Outbound<RoundID, Msg> + Send,
     Stream: 'static + PullStream<(Prin, Msg)> + Send,
     Msg: 'static + Debug + RoundMsg<RoundID> + Send,
     Prin: 'static + Display + Eq + Hash + Send,
@@ -121,9 +120,9 @@ where
         PollThread {
             oper: PhantomData,
             round_ids: PhantomData,
+            party_ids: PhantomData,
             parties: PhantomData,
             msg: PhantomData,
-            out: PhantomData,
             reporter: reporter,
             prins: prins.map(|(a, b)| (b, a)).collect(),
             rounds: rounds,
@@ -168,7 +167,9 @@ where
                 Err(err) => {
                     error!(target: "consensus-component-poll-thread",
                            "error receiving: {}",
-                           err)
+                           err);
+
+                    valid = false
                 }
             }
         }
