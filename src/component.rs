@@ -468,7 +468,7 @@ where
     ) -> Result<(), Self::RecvError> {
         let guard = self.prins.read().map_err(|_| MutexPoison)?;
 
-        match guard.get(&prin) {
+        match guard.get(prin) {
             Some(party) => {
                 if let Err(err) =
                     self.rounds.recv(&mut self.reporter, party, msg)
