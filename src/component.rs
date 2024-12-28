@@ -149,15 +149,14 @@ where
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
     RoundID: Clone + Display + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send,
-{
+    Msg: RoundMsg<RoundID> + Send {
     oper: PhantomData<Oper>,
     msg: PhantomData<Msg>,
     round_ids: PhantomData<RoundID>,
     prins: Arc<RwLock<HashMap<Prin, PartyStreamIdx>>>,
     reporter: Reporter,
     notify: Notify,
-    rounds: R,
+    rounds: R
 }
 
 pub type CompoundConsensusComponent<
@@ -346,24 +345,26 @@ impl From<PartyRoundIdx> for usize {
     }
 }
 
-unsafe impl<R, Reporter, RoundID, Prin, Oper, Msg> Send for
-    ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+unsafe impl<R, Reporter, RoundID, Prin, Oper, Msg> Send
+    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
 where
     R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
     RoundID: Clone + Display + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send {
+    Msg: RoundMsg<RoundID> + Send
+{
 }
 
-unsafe impl<R, Reporter, RoundID, Prin, Oper, Msg> Sync for
-    ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+unsafe impl<R, Reporter, RoundID, Prin, Oper, Msg> Sync
+    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
 where
     R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
     RoundID: Clone + Display + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send {
+    Msg: RoundMsg<RoundID> + Send
+{
 }
 
 impl<R, Reporter, RoundID, Prin, Oper, Msg> Clone
@@ -373,7 +374,8 @@ where
     Reporter: Clone + RoundResultReporter<RoundID, Oper> + Send + Sync,
     RoundID: Clone + Display + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send {
+    Msg: RoundMsg<RoundID> + Send
+{
     #[inline]
     fn clone(&self) -> Self {
         ConsensusAuthNRecv {
@@ -383,7 +385,7 @@ where
             prins: self.prins.clone(),
             reporter: self.reporter.clone(),
             notify: self.notify.clone(),
-            rounds: self.rounds.clone(),
+            rounds: self.rounds.clone()
         }
     }
 }
@@ -395,13 +397,13 @@ where
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
     RoundID: Clone + Display + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send {
-
+    Msg: RoundMsg<RoundID> + Send
+{
     #[inline]
     fn create(
         reporter: Reporter,
         rounds: R,
-        notify: Notify,
+        notify: Notify
     ) -> Self {
         ConsensusAuthNRecv {
             oper: PhantomData,
@@ -410,21 +412,18 @@ where
             prins: Arc::new(RwLock::new(HashMap::new())),
             reporter: reporter,
             notify: notify,
-            rounds: rounds,
+            rounds: rounds
         }
     }
 
     #[inline]
     fn set_parties<I>(
         &mut self,
-        prins: I,
+        prins: I
     ) -> Result<(), MutexPoison>
     where
         I: Iterator<Item = (PartyStreamIdx, Prin)> {
-        let mut guard = self
-            .prins
-            .write()
-            .map_err(|_| MutexPoison)?;
+        let mut guard = self.prins.write().map_err(|_| MutexPoison)?;
 
         *guard = prins.map(|(a, b)| (b, a)).collect();
 
@@ -439,7 +438,8 @@ where
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
     RoundID: Clone + Display + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send {
+    Msg: RoundMsg<RoundID> + Send
+{
     fn drop(&mut self) {
         if let Err(err) = self.notify.notify() {
             error!(target: "consensus-recv-authn-msg",
@@ -456,7 +456,8 @@ where
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
     RoundID: Clone + Display + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send {
+    Msg: RoundMsg<RoundID> + Send
+{
     type RecvError = MutexPoison;
 
     /// Receive an authenticated message.
@@ -465,10 +466,7 @@ where
         prin: &Prin,
         msg: Msg
     ) -> Result<(), Self::RecvError> {
-        let guard = self
-            .prins
-            .read()
-            .map_err(|_| MutexPoison)?;
+        let guard = self.prins.read().map_err(|_| MutexPoison)?;
 
         match guard.get(&prin) {
             Some(party) => {
@@ -671,8 +669,8 @@ where
             Prin,
             PrinCodec,
             StaticParties<PartyStreamIdx>
-        > = match SharedConsensusProto::create(proto_config,
-                                               prin_codec.clone()) {
+        > = match SharedConsensusProto::create(proto_config, prin_codec.clone())
+        {
             Ok(proto) => proto,
             Err(err) => {
                 error!(target: "consensus-component",
@@ -682,17 +680,16 @@ where
                 return Err(ConsensusComponentRunError);
             }
         };
-        let mut rounds =
-            match proto.rounds(round_ids) {
-                Ok(proto) => proto,
-                Err(err) => {
-                    error!(target: "consensus-component",
+        let mut rounds = match proto.rounds(round_ids) {
+            Ok(proto) => proto,
+            Err(err) => {
+                error!(target: "consensus-component",
                            "error creating consensus protocol rounds: {}",
                            err);
 
-                    return Err(ConsensusComponentRunError);
-                }
-            };
+                return Err(ConsensusComponentRunError);
+            }
+        };
         let notify = Notify::new();
         let (state, round_reporter) =
             StateThread::create(notify.clone(), shutdown.clone());
@@ -703,14 +700,13 @@ where
         );
         let listener =
             ThreadedFlowsPullStreamListener::create(listener, msg_codec);
-        let (pull_streams, pull_listener) =
-            PullStreams::with_capacity(
-                listener,
-                authn_msg_recv.clone(),
-                shutdown.clone(),
-                PassthruMsgAuthN::default(),
-                1
-            );
+        let (pull_streams, pull_listener) = PullStreams::with_capacity(
+            listener,
+            authn_msg_recv.clone(),
+            shutdown.clone(),
+            PassthruMsgAuthN::default(),
+            1
+        );
         let stream_reporter = pull_streams.reporter();
 
         // Bring up the push-side.
@@ -821,17 +817,18 @@ where
             Err(_) => panic!("Impossible case!")
         };
 
-        if let Err(err) = rounds
-            .set_parties(prin_codec, self_party, &party_data) {
+        if let Err(err) =
+            rounds.set_parties(prin_codec, self_party, &party_data)
+        {
             error!("error setting parties: {}", err);
 
-            return Err(ConsensusComponentRunError)
+            return Err(ConsensusComponentRunError);
         }
 
         if let Err(err) = rounds.advance() {
             error!("error creating first round: {}", err);
 
-            return Err(ConsensusComponentRunError)
+            return Err(ConsensusComponentRunError);
         }
 
         let party_iter = match stream.parties() {
