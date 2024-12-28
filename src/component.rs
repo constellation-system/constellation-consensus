@@ -80,7 +80,8 @@ use constellation_consensus_common::parties::StaticParties;
 use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoRounds;
 use constellation_consensus_common::proto::SharedConsensusProto;
-use constellation_consensus_common::round::SharedRounds;
+use constellation_consensus_common::round::RoundsAdvance;
+use constellation_consensus_common::round::RoundsSetParties;
 use constellation_consensus_common::state::ProtoState;
 #[cfg(feature = "standalone")]
 use constellation_pbft::msgs::PBFTMsgPERCodec;
@@ -110,7 +111,7 @@ use crate::config::ConsensusConfig;
 use crate::config::PartiesConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
-use crate::poll::PollThread;
+use crate::recv::ConsensusAuthNRecv;
 use crate::state::StateThread;
 
 /// Index used to identify principals in the stream.
@@ -287,7 +288,6 @@ pub struct ConsensusComponent<
 pub struct ConsensusComponentCleanup {
     notify: Notify,
     shutdown: ShutdownFlag,
-    poll_join: JoinHandle<()>,
     sender_join: JoinHandle<()>,
     pull_join: JoinHandle<()>,
     state_join: JoinHandle<()>
@@ -494,23 +494,58 @@ where
                 return Err(ConsensusComponentRunError);
             }
         };
+        let proto: SharedConsensusProto<
+            Proto,
+            RoundIDs,
+            PartyStreamIdx,
+            Prin,
+            PrinCodec,
+            StaticParties<PartyStreamIdx>
+        > = match SharedConsensusProto::create(proto_config, prin_codec.clone())
+        {
+            Ok(proto) => proto,
+            Err(err) => {
+                error!(target: "consensus-component",
+                           "error creating consensus protocol: {}",
+                           err);
 
+                return Err(ConsensusComponentRunError);
+            }
+        };
+        let mut rounds = match proto.rounds(round_ids) {
+            Ok(proto) => proto,
+            Err(err) => {
+                error!(target: "consensus-component",
+                           "error creating consensus protocol rounds: {}",
+                           err);
+
+                return Err(ConsensusComponentRunError);
+            }
+        };
+        let notify = Notify::new();
+        let (state, round_reporter) =
+            StateThread::create(notify.clone(), shutdown.clone());
+        let mut authn_msg_recv = ConsensusAuthNRecv::create(
+            round_reporter,
+            rounds.clone(),
+            notify.clone()
+        );
         let listener =
             ThreadedFlowsPullStreamListener::create(listener, msg_codec);
-        let (pull_streams, pull_listener, receiver) =
-            PullStreams::with_capacity(
-                listener,
-                shutdown.clone(),
-                PassthruMsgAuthN::default(),
-                1
-            );
+        let (pull_streams, pull_listener) = PullStreams::with_capacity(
+            listener,
+            authn_msg_recv.clone(),
+            shutdown.clone(),
+            PassthruMsgAuthN::default(),
+            1
+        );
         let stream_reporter = pull_streams.reporter();
 
         // Bring up the push-side.
         debug!(target: "consensus-component",
                "initializing push streams");
 
-        let (stream, parties) = match parties_config {
+        let stream = match parties_config {
             PartiesConfig::Static { stat } => {
                 let mut party_streams = Vec::with_capacity(stat.len());
 
@@ -522,7 +557,7 @@ where
                         FarChannelRegistryChannels<
                             Proto::Msg,
                             MsgCodec,
-                            PullStreamsReporter<Proto::Msg, _, _, _>,
+                            PullStreamsReporter<Proto::Msg, _, _, _, _>,
                             Channel,
                             F,
                             AuthN,
@@ -566,7 +601,7 @@ where
                         FarChannelRegistryChannels<
                             Proto::Msg,
                             MsgCodec,
-                            PullStreamsReporter<Proto::Msg, _, _, _>,
+                            PullStreamsReporter<Proto::Msg, _, _, _, _>,
                             Channel,
                             F,
                             AuthN,
@@ -580,20 +615,10 @@ where
                     party_streams.into_iter(),
                     slots_config
                 );
-                let parties = match stream.parties() {
-                    Ok(parties) => {
-                        StaticParties::from_parties(parties.map(|(idx, _)| idx))
-                    }
-                    // This is here as a placeholder; this type is
-                    // uninhabited, and Rust > 1.81 clippy generates an error
-                    // for this.
-                    Err(_) => panic!("Impossible case!")
-                };
 
-                (stream, parties)
+                stream
             }
         };
-
         let party_data = match stream.parties() {
             Ok(parties) => {
                 let mut parties: Vec<(PartyStreamIdx, Prin)> =
@@ -623,6 +648,21 @@ where
             // for this.
             Err(_) => panic!("Impossible case!")
         };
+
+        if let Err(err) =
+            rounds.set_parties(prin_codec, self_party, &party_data)
+        {
+            error!("error setting parties: {}", err);
+
+            return Err(ConsensusComponentRunError);
+        }
+
+        if let Err(err) = rounds.advance() {
+            error!("error creating first round: {}", err);
+
+            return Err(ConsensusComponentRunError);
+        }
+
         let party_iter = match stream.parties() {
             Ok(party_iter) => party_iter,
             // This is here as a placeholder; this type is
@@ -630,78 +670,30 @@ where
             // for this.
             Err(_) => panic!("Impossible case!")
         };
-        let proto: SharedConsensusProto<
-            Proto,
-            RoundIDs,
-            PartyStreamIdx,
-            Prin,
-            PrinCodec,
-            StaticParties<PartyStreamIdx>
-        > = match SharedConsensusProto::create(proto_config, prin_codec) {
-            Ok(proto) => proto,
-            Err(err) => {
-                error!(target: "consensus-component",
-                           "error creating consensus protocol: {}",
-                           err);
 
-                return Err(ConsensusComponentRunError);
-            }
-        };
-        let rounds =
-            match proto.rounds(round_ids, parties, self_party, &party_data) {
-                Ok(proto) => proto,
-                Err(err) => {
-                    error!(target: "consensus-component",
-                           "error creating consensus protocol rounds: {}",
-                           err);
-
-                    return Err(ConsensusComponentRunError);
-                }
-            };
+        if let Err(err) = authn_msg_recv.set_parties(party_iter) {
+            error!("error setting parties: {}", err);
+        }
 
         debug!(target: "consensus-component",
                "starting pull listener");
 
         let stream_reporter = stream.reporter(stream_reporter);
-        let notify = Notify::new();
-        let (state, round_reporter) =
-            StateThread::create(notify.clone(), shutdown.clone());
         let state_join = state.start(rounds.clone());
         let pull_join = pull_listener.start(stream_reporter);
-        let poll: PollThread<
-            SharedRounds<Proto::Rounds, _, _, _, _, _>,
-            _,
-            _,
-            StaticParties<PartyStreamIdx>,
-            _,
-            _,
-            _,
-            _,
-            _
-        > = PollThread::create(
-            receiver,
-            round_reporter,
-            rounds.clone(),
+        let sender = PushStreamSharedThread::create(
+            ctx,
+            rounds,
             notify.clone(),
-            party_iter,
+            stream,
             shutdown.clone()
         );
-        let poll_join = poll.start();
-        let sender: PushStreamSharedThread<_, _, _, _> =
-            PushStreamSharedThread::create(
-                ctx,
-                rounds,
-                notify.clone(),
-                stream,
-                shutdown.clone()
-            );
         let notify = sender.notify();
         let sender_join = sender.start();
 
         Ok(ConsensusComponentCleanup {
             notify: notify,
             shutdown: shutdown,
-            poll_join: poll_join,
             sender_join: sender_join,
             state_join: state_join,
             pull_join: pull_join
@@ -725,14 +717,6 @@ impl ConsensusComponentCleanup {
         if self.sender_join.join().is_err() {
             error!(target: "consensus-component-cleanup",
                    "error joining sender")
-        }
-
-        debug!(target: "consensus-component-cleanup",
-               "joining listener");
-
-        if self.poll_join.join().is_err() {
-            error!(target: "consensus-component-cleanup",
-                   "error joining polling thread")
         }
 
         debug!(target: "consensus-component-cleanup",
@@ -812,7 +796,7 @@ impl Standalone
     for CompoundConsensusComponent<
         StandaloneCtx,
         AscendingCount,
-        PBFTProto<AscendingCount, String, StringPrincipalCodec>,
+        PBFTProto<AscendingCount, String>,
         PBFTMsgPERCodec,
         String,
         StringPrincipalCodec
