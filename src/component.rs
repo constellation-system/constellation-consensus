@@ -47,8 +47,8 @@ use constellation_channels::far::compound::CompoundFarCredential;
 use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::far::flows::CreateOwnedFlows;
 use constellation_channels::far::flows::Flows;
-use constellation_channels::far::flows::OwnedFlows;
 use constellation_channels::far::flows::Negotiator;
+use constellation_channels::far::flows::OwnedFlows;
 use constellation_channels::far::flows::ThreadedFlows;
 use constellation_channels::far::flows::ThreadedFlowsListener;
 use constellation_channels::far::flows::ThreadedFlowsPullStreamListener;
@@ -945,7 +945,6 @@ impl Standalone
         create_cleanup.shutdown.set();
 
         if let Some(cleanup) = run_cleanup {
-
             debug!(target: "consensus-standalone",
                "cleaning up runtime");
 
