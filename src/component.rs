@@ -47,8 +47,8 @@ use constellation_channels::far::compound::CompoundFarCredential;
 use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::far::flows::CreateOwnedFlows;
 use constellation_channels::far::flows::Flows;
+use constellation_channels::far::flows::Negotiator;
 use constellation_channels::far::flows::OwnedFlows;
-use constellation_channels::far::flows::OwnedFlowsNegotiator;
 use constellation_channels::far::flows::ThreadedFlows;
 use constellation_channels::far::flows::ThreadedFlowsListener;
 use constellation_channels::far::flows::ThreadedFlowsPullStreamListener;
@@ -195,7 +195,7 @@ pub struct ConsensusComponent<
     <MsgCodec as DatagramCodec<Proto::Msg>>::EncodeError:
         ErrorReportInfo<DenseItemID<usize>>,
     AuthN: Clone
-        + SessionAuthN<<Channel::Nego as OwnedFlowsNegotiator>::Flow, Prin = Prin>
+        + SessionAuthN<<Channel::Nego as Negotiator>::Flow, Prin = Prin>
         + SessionAuthN<<Channel::Owned as OwnedFlows>::Flow, Prin = Prin>
         + Send
         + Sync,
@@ -373,7 +373,7 @@ where
         ErrorReportInfo<DenseItemID<usize>>,
     AuthN: 'static
         + Clone
-        + SessionAuthN<<Channel::Nego as OwnedFlowsNegotiator>::Flow, Prin = Prin>
+        + SessionAuthN<<Channel::Nego as Negotiator>::Flow, Prin = Prin>
         + SessionAuthN<<Channel::Owned as OwnedFlows>::Flow, Prin = Prin>
         + Send
         + Sync,
@@ -567,6 +567,7 @@ where
                         Ctx
                     >::create(
                         &mut ctx,
+                        shutdown.clone(),
                         stream_reporter.clone(),
                         party_config,
                         successors(Some(0), |n| Some(n + 1))
@@ -734,6 +735,9 @@ impl ConsensusComponentCleanup {
             error!(target: "consensus-component-cleanup",
                    "error joining state thread")
         }
+
+        debug!(target: "consensus-component-cleanup",
+               "all threads joined");
     }
 }
 
@@ -815,9 +819,9 @@ impl Standalone
     ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
         let (name_caches_config, registry_config, consensus_config) =
             config.take();
-        let (mut caches, caches_join) =
-            ThreadedNSNameCaches::create(name_caches_config);
         let shutdown = ShutdownFlag::new();
+        let (mut caches, caches_join) =
+            ThreadedNSNameCaches::create(name_caches_config, shutdown.clone());
         let cleanup = StandaloneCreateCleanup {
             shutdown: shutdown.clone(),
             caches_join: caches_join
@@ -941,8 +945,14 @@ impl Standalone
         create_cleanup.shutdown.set();
 
         if let Some(cleanup) = run_cleanup {
+            debug!(target: "consensus-standalone",
+               "cleaning up runtime");
+
             cleanup.cleanup();
         }
+
+        debug!(target: "consensus-standalone",
+               "cleaning up caches");
 
         if create_cleanup.caches_join.join().is_err() {
             error!(target: "standalone-shutdown",

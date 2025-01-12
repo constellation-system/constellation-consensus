@@ -36,7 +36,7 @@ name = "constellation-consensus"
 required-features = ["standalone"]
 
 [features]
-default = ["dtls", "log", "openssl", "socks5", "standalone", "tls", "unix"]
+default = ["dtls", "gssapi", "log", "openssl", "socks5", "standalone", "tls", "unix"]
 dtls = ["constellation-channels/dtls"]
 gssapi = ["constellation-auth/gssapi",
           "constellation-channels/gssapi",
