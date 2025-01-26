@@ -45,15 +45,12 @@ use constellation_channels::far::compound::CompoundFarChannelXfrm;
 use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
 use constellation_channels::far::compound::CompoundFarCredential;
 use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
-use constellation_channels::far::flows::CreateOwnedFlows;
-use constellation_channels::far::flows::Flows;
-use constellation_channels::far::flows::Negotiator;
-use constellation_channels::far::flows::OwnedFlows;
-use constellation_channels::far::flows::ThreadedFlows;
+use constellation_channels::far::flows::OwnedFlowNegotiator;
+use constellation_channels::far::flows::OwnedFlowsCreate;
 use constellation_channels::far::flows::ThreadedFlowsListener;
 use constellation_channels::far::flows::ThreadedFlowsPullStreamListener;
 #[cfg(feature = "standalone")]
-use constellation_channels::far::registry::FarChannelRegistry;
+use constellation_channels::far::registry::CompoundFarChannelRegistry;
 use constellation_channels::far::registry::FarChannelRegistryChannels;
 use constellation_channels::far::registry::FarChannelRegistryCtx;
 use constellation_channels::far::registry::FarChannelRegistryID;
@@ -69,7 +66,6 @@ use constellation_channels::unix::UnixSocketAddr;
 use constellation_common::codec::DatagramCodec;
 use constellation_common::net::DatagramXfrm;
 use constellation_common::net::DatagramXfrmCreate;
-use constellation_common::net::DatagramXfrmCreateParam;
 use constellation_common::net::IPEndpointAddr;
 use constellation_common::net::SharedMsgs;
 use constellation_common::net::Socket;
@@ -137,31 +133,25 @@ pub struct AscendingCount {
     curr: u128
 }
 
-pub type CompoundConsensusComponent<
-    Ctx,
-    RoundIDs,
-    Proto,
-    MsgCodec,
-    Prin,
-    PrinCodec
-> = ConsensusComponent<
-    RoundIDs,
-    Proto,
-    MsgCodec,
-    CompoundFarChannel,
-    ThreadedFlows<
+pub type CompoundConsensusComponent<Ctx, RoundIDs, Proto, MsgCodec, PrinCodec> =
+    ConsensusComponent<
+        RoundIDs,
+        Proto,
+        MsgCodec,
         CompoundFarChannel,
+        CompoundFarChannelThreadedFlows<
+            Arc<TestAuthN<String, TestCred>>,
+            UnixDatagramXfrm,
+            UDPDatagramXfrm,
+            FarChannelRegistryID
+        >,
+        Arc<TestAuthN<String, TestCred>>,
         CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
-        FarChannelRegistryID
-    >,
-    Arc<TestAuthN<String, TestCred>>,
-    CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
-    Ctx,
-    MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundEndpoint>,
-    Prin,
-    PrinCodec,
-    CompoundEndpoint
->;
+        Ctx,
+        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundEndpoint>,
+        PrinCodec,
+        CompoundEndpoint
+    >;
 
 pub struct ConsensusComponent<
     RoundIDs,
@@ -173,63 +163,23 @@ pub struct ConsensusComponent<
     Xfrm,
     Ctx,
     Resolver,
-    Prin,
     PrinCodec,
     Endpoint
 > where
     RoundIDs: 'static + Iterator + Send,
     RoundIDs::Item: Clone + Display + Ord + Send,
-    Proto: ConsensusProto<Prin, PrinCodec>
-        + ConsensusProtoRounds<
-            RoundIDs,
-            PartyStreamIdx,
-            Prin,
-            PrinCodec,
-            StaticParties<PartyStreamIdx>
-        > + Send,
-    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper: Send,
-    Proto::Msg: Clone + Debug + Send,
-    Proto::Out: Send,
+    AuthN: Clone
+        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
+        + Send
+        + Sync,
+    AuthN::Prin: 'static + Clone + Display + Eq + Hash + Send,
     MsgCodec: Clone + DatagramCodec<Proto::Msg> + Send,
     <MsgCodec as DatagramCodec<Proto::Msg>>::Param: Default,
     <MsgCodec as DatagramCodec<Proto::Msg>>::EncodeError:
         ErrorReportInfo<DenseItemID<usize>>,
-    AuthN: Clone
-        + SessionAuthN<<Channel::Nego as Negotiator>::Flow, Prin = Prin>
-        + SessionAuthN<<Channel::Owned as OwnedFlows>::Flow, Prin = Prin>
-        + Send
-        + Sync,
-    <AuthN as SessionAuthN<<Channel::Owned as OwnedFlows>::Flow>>::Prin: Send,
-    Ctx: 'static
-        + FarChannelRegistryCtx<Channel, F, AuthN, Xfrm>
-        + NSNameCachesCtx
-        + Send
-        + Sync,
-    Ctx::NameCaches: NSNameCachesCtx,
-    Channel: 'static
-        + FarChannelOwnedFlows<F, AuthN, Xfrm>
-        + FarChannelCreate
-        + Send
-        + Sync,
-    <Channel::Owned as OwnedFlows>::Flow: 'static + ConcurrentStream + Send,
-    F: 'static
-        + Flows<Xfrm = Channel::Xfrm>
-        + CreateOwnedFlows<Channel::Nego, AuthN, ChannelID = FarChannelRegistryID>
-        + OwnedFlows<Xfrm = Channel::Xfrm>,
-    <F::Xfrm as DatagramXfrm>::PeerAddr:
-        From<<Channel::Xfrm as DatagramXfrm>::PeerAddr>,
-    F::CreateParam: Clone + Default + Send + Sync,
-    F::Reporter: Clone + Send + Sync,
-    Xfrm: 'static
-        + DatagramXfrm
-        + DatagramXfrmCreate<Addr = Channel::Param>
-        + DatagramXfrmCreateParam,
-    Xfrm::CreateParam: Clone + Default + Send + Sync,
-    Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
-    <Channel::Xfrm as DatagramXfrm>::PeerAddr:
-        'static + Clone + Eq + Hash + Send + Sync,
-    Channel::Acquired:
-        FarChannelAcquiredResolve<Resolved = Channel::Param> + Send + Sync,
+    Channel:
+        FarChannelOwnedFlows<F, AuthN, Xfrm> + FarChannelCreate + Send + Sync,
+    Channel::Acquired: FarChannelAcquiredResolve<Resolved = Channel::Param>,
     Channel::Param: 'static
         + Clone
         + Display
@@ -239,10 +189,40 @@ pub struct ConsensusComponent<
         + ChannelParam<<Channel::Xfrm as DatagramXfrm>::PeerAddr>
         + Send
         + Sync,
-    Channel::Owned: Send + Sync,
-    F::Socket: From<Channel::Socket>,
-    Prin: 'static + Clone + Display + Eq + Hash + Send,
-    PrinCodec: Clone + DatagramCodec<Prin> + Send,
+    Channel::Acquired:
+        FarChannelAcquiredResolve<Resolved = Channel::Param> + Send + Sync,
+    <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow:
+        ConcurrentStream + Send,
+    <Channel::Xfrm as DatagramXfrm>::PeerAddr: Eq + Hash + Send + Sync,
+    F: OwnedFlowsCreate<Channel::Socket, Channel::Nego, AuthN, Channel::Xfrm>
+        + Send,
+    F::Flow: 'static + ConcurrentStream + Send,
+    F::CreateParam: Clone + Default + Send + Sync,
+    F::Reporter: Clone + Send + Sync,
+    F::ChannelID: From<usize> + Into<usize> + Send + Sync,
+    Xfrm:
+        DatagramXfrm + DatagramXfrmCreate<Addr = Channel::Param> + Send + Sync,
+    Xfrm::CreateParam: Clone + Default + Send + Sync,
+    Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
+    Proto: ConsensusProto<AuthN::Prin, PrinCodec>
+        + ConsensusProtoRounds<
+            RoundIDs,
+            PartyStreamIdx,
+            AuthN::Prin,
+            PrinCodec,
+            StaticParties<PartyStreamIdx>
+        > + Send,
+    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper: Send,
+    Proto::Msg: Clone + Debug + Send,
+    Proto::Out: Send,
+    Ctx: 'static
+        + FarChannelRegistryCtx<Channel, F, AuthN, Xfrm>
+        + NSNameCachesCtx
+        + Send
+        + Sync,
+    Proto::Rounds: SharedMsgs<PartyStreamIdx, Proto::Msg> + Send,
+    Ctx::NameCaches: NSNameCachesCtx,
+    PrinCodec: Clone + DatagramCodec<AuthN::Prin> + Send,
     PrinCodec::Param: Default,
     Endpoint: 'static + Send,
     Resolver: 'static
@@ -266,20 +246,20 @@ pub struct ConsensusComponent<
     xfrm: PhantomData<Xfrm>,
     resolver: PhantomData<Resolver>,
     config: ConsensusConfig<
-        Prin,
+        AuthN::Prin,
         PrinCodec::Param,
         Proto::Config,
         ChannelRegistryChannelsConfig<MsgCodec::Param>,
         Endpoint
     >,
     listener: ThreadedFlowsListener<
+        <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
         StreamID<
             <Channel::Xfrm as DatagramXfrm>::PeerAddr,
             F::ChannelID,
             Channel::Param
         >,
-        <AuthN as SessionAuthN<<Channel::Owned as OwnedFlows>::Flow>>::Prin,
-        <Channel::Owned as OwnedFlows>::Flow
+        AuthN::Prin
     >,
     shutdown: ShutdownFlag,
     ctx: Ctx
@@ -333,7 +313,6 @@ impl<
         Xfrm,
         Ctx,
         Resolver,
-        Prin,
         PrinCodec,
         Endpoint
     >
@@ -347,67 +326,28 @@ impl<
         Xfrm,
         Ctx,
         Resolver,
-        Prin,
         PrinCodec,
         Endpoint
     >
 where
     RoundIDs: 'static + Iterator + Send,
-    RoundIDs::Item: 'static + Clone + Display + Ord + Send,
-    Proto: ConsensusProto<Prin, PrinCodec>
-        + ConsensusProtoRounds<
-            RoundIDs,
-            PartyStreamIdx,
-            Prin,
-            PrinCodec,
-            StaticParties<PartyStreamIdx>
-        > + Send,
-    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper:
-        'static + Send,
-    Proto::Msg: 'static + Clone + Debug + Send,
-    Proto::Rounds: 'static + Send + SharedMsgs<PartyStreamIdx, Proto::Msg>,
-    Proto::Out: 'static + Send,
+    RoundIDs::Item: Clone + Display + Ord + Send,
+    AuthN: 'static
+        + Clone
+        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
+        + Send
+        + Sync,
+    AuthN::Prin: 'static + Clone + Display + Eq + Hash + Send,
     MsgCodec: 'static + Clone + DatagramCodec<Proto::Msg> + Send,
     <MsgCodec as DatagramCodec<Proto::Msg>>::Param: Default,
     <MsgCodec as DatagramCodec<Proto::Msg>>::EncodeError:
         ErrorReportInfo<DenseItemID<usize>>,
-    AuthN: 'static
-        + Clone
-        + SessionAuthN<<Channel::Nego as Negotiator>::Flow, Prin = Prin>
-        + SessionAuthN<<Channel::Owned as OwnedFlows>::Flow, Prin = Prin>
-        + Send
-        + Sync,
-    <AuthN as SessionAuthN<<Channel::Owned as OwnedFlows>::Flow>>::Prin: Send,
-    Ctx: 'static
-        + FarChannelRegistryCtx<Channel, F, AuthN, Xfrm>
-        + NSNameCachesCtx
-        + Send
-        + Sync,
-    Ctx::NameCaches: NSNameCachesCtx,
     Channel: 'static
         + FarChannelOwnedFlows<F, AuthN, Xfrm>
         + FarChannelCreate
         + Send
         + Sync,
-    <Channel::Owned as OwnedFlows>::Flow: 'static + ConcurrentStream + Send,
-    F: 'static
-        + Flows<Xfrm = Channel::Xfrm>
-        + CreateOwnedFlows<Channel::Nego, AuthN, ChannelID = FarChannelRegistryID>
-        + OwnedFlows<Xfrm = Channel::Xfrm>,
-    <F::Xfrm as DatagramXfrm>::PeerAddr:
-        From<<Channel::Xfrm as DatagramXfrm>::PeerAddr>,
-    F::CreateParam: Clone + Default + Send + Sync,
-    F::Reporter: Clone + Send + Sync,
-    Xfrm: 'static
-        + DatagramXfrm
-        + DatagramXfrmCreate<Addr = Channel::Param>
-        + DatagramXfrmCreateParam,
-    Xfrm::CreateParam: Clone + Default + Send + Sync,
-    Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
-    <Channel::Xfrm as DatagramXfrm>::PeerAddr:
-        'static + Clone + Eq + Hash + Send + Sync,
-    Channel::Acquired:
-        FarChannelAcquiredResolve<Resolved = Channel::Param> + Send + Sync,
+    Channel::Acquired: FarChannelAcquiredResolve<Resolved = Channel::Param>,
     Channel::Param: 'static
         + Clone
         + Display
@@ -417,12 +357,47 @@ where
         + ChannelParam<<Channel::Xfrm as DatagramXfrm>::PeerAddr>
         + Send
         + Sync,
-    Channel::Owned: Send + Sync,
-    F::Socket: From<Channel::Socket>,
-    Endpoint: 'static + Send,
-    Prin: 'static + Clone + Display + Eq + Hash + Send,
-    PrinCodec: 'static + Clone + DatagramCodec<Prin> + Send,
+    Channel::Acquired:
+        FarChannelAcquiredResolve<Resolved = Channel::Param> + Send + Sync,
+    <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow:
+        ConcurrentStream + Send,
+    <Channel::Xfrm as DatagramXfrm>::PeerAddr: Eq + Hash + Send + Sync,
+    F: 'static,
+    F: OwnedFlowsCreate<Channel::Socket, Channel::Nego, AuthN, Channel::Xfrm>
+        + Send,
+    F::Flow: 'static + ConcurrentStream + Send,
+    F::CreateParam: Clone + Default + Send + Sync,
+    F::Reporter: Clone + Send + Sync,
+    F::ChannelID: From<usize> + Into<usize> + Send + Sync,
+    Xfrm: 'static
+        + DatagramXfrm
+        + DatagramXfrmCreate<Addr = Channel::Param>
+        + Send
+        + Sync,
+    Xfrm::CreateParam: Clone + Default + Send + Sync,
+    Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
+    Proto: ConsensusProto<AuthN::Prin, PrinCodec>
+        + ConsensusProtoRounds<
+            RoundIDs,
+            PartyStreamIdx,
+            AuthN::Prin,
+            PrinCodec,
+            StaticParties<PartyStreamIdx>
+        > + Send,
+    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper:
+        'static + Send,
+    Proto::Msg: 'static + Clone + Debug + Send,
+    Proto::Out: 'static + Send,
+    Ctx: 'static
+        + FarChannelRegistryCtx<Channel, F, AuthN, Xfrm>
+        + NSNameCachesCtx
+        + Send
+        + Sync,
+    Proto::Rounds: 'static + SharedMsgs<PartyStreamIdx, Proto::Msg> + Send,
+    Ctx::NameCaches: NSNameCachesCtx,
+    PrinCodec: Clone + DatagramCodec<AuthN::Prin> + Send,
     PrinCodec::Param: Default,
+    Endpoint: 'static + Send,
     Resolver: 'static
         + Addrs<Addr = <Channel::Xfrm as DatagramXfrm>::PeerAddr>
         + AddrsCreate<Ctx, Vec<Endpoint>, Config = ResolverConfig>
@@ -498,7 +473,7 @@ where
             Proto,
             RoundIDs,
             PartyStreamIdx,
-            Prin,
+            AuthN::Prin,
             PrinCodec,
             StaticParties<PartyStreamIdx>
         > = match SharedConsensusProto::create(proto_config, prin_codec.clone())
@@ -594,7 +569,7 @@ where
                 }
 
                 let stream: StreamMulticaster<
-                    Prin,
+                    AuthN::Prin,
                     PartyStreamIdx,
                     Proto::Msg,
                     StreamSelector<
@@ -622,7 +597,7 @@ where
         };
         let party_data = match stream.parties() {
             Ok(parties) => {
-                let mut parties: Vec<(PartyStreamIdx, Prin)> =
+                let mut parties: Vec<(PartyStreamIdx, AuthN::Prin)> =
                     parties.collect();
 
                 parties.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -748,15 +723,11 @@ pub struct StandaloneCreateCleanup {
 }
 
 #[cfg(feature = "standalone")]
-pub type StandaloneRegistry = FarChannelRegistry<
-    CompoundFarChannel,
-    CompoundFarChannelThreadedFlows<
-        UnixDatagramXfrm,
-        UDPDatagramXfrm,
-        FarChannelRegistryID
-    >,
+pub type StandaloneRegistry = CompoundFarChannelRegistry<
     Arc<TestAuthN<String, TestCred>>,
-    CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>
+    UnixDatagramXfrm,
+    UDPDatagramXfrm,
+    FarChannelRegistryID
 >;
 
 #[cfg(feature = "standalone")]
@@ -781,6 +752,7 @@ impl
     FarChannelRegistryCtx<
         CompoundFarChannel,
         CompoundFarChannelThreadedFlows<
+            Arc<TestAuthN<String, TestCred>>,
             UnixDatagramXfrm,
             UDPDatagramXfrm,
             FarChannelRegistryID
@@ -802,7 +774,6 @@ impl Standalone
         AscendingCount,
         PBFTProto<AscendingCount, String>,
         PBFTMsgPERCodec,
-        String,
         StringPrincipalCodec
     >
 {
@@ -900,10 +871,10 @@ impl Standalone
                 let round_ids = AscendingCount { curr: 0 };
                 let standalone = ConsensusComponent {
                     channel: PhantomData,
-                    proto: PhantomData,
-                    flow: PhantomData,
-                    xfrm: PhantomData,
                     resolver: PhantomData,
+                    proto: PhantomData,
+                    xfrm: PhantomData,
+                    flow: PhantomData,
                     round_ids: round_ids,
                     config: consensus_config,
                     shutdown: shutdown,
