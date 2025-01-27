@@ -29,6 +29,5 @@
 pub mod component;
 pub mod config;
 
-mod poll;
-mod send;
+mod recv;
 mod state;

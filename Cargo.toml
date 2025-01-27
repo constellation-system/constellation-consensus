@@ -36,12 +36,13 @@ name = "constellation-consensus"
 required-features = ["standalone"]
 
 [features]
-default = ["dtls", "log", "openssl", "socks5", "standalone", "tls", "unix"]
+default = ["dtls", "gssapi", "log", "openssl", "socks5", "standalone", "tls", "unix"]
 dtls = ["constellation-channels/dtls"]
 gssapi = ["constellation-auth/gssapi",
           "constellation-channels/gssapi",
           "constellation-common/gssapi",
           "constellation-consensus-common/gssapi",
+          "constellation-standalone/gssapi",
           "constellation-streams/gssapi"]
 log = ["dep:log",
        "constellation-auth/log",
@@ -55,6 +56,7 @@ openssl = ["constellation-auth/openssl",
            "constellation-channels/openssl",
            "constellation-common/openssl",
            "constellation-consensus-common/openssl",
+           "constellation-standalone/openssl",
            "constellation-streams/openssl"]
 socks5 = ["constellation-channels/socks5"]
 standalone = ["dep:constellation-standalone",
@@ -63,6 +65,7 @@ tls = ["constellation-channels/tls"]
 unix = ["constellation-auth/unix",
         "constellation-channels/unix",
         "constellation-common/unix",
+        "constellation-standalone/unix",
         "constellation-streams/unix"]
 
 [dependencies]
