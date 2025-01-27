@@ -39,7 +39,6 @@ use constellation_channels::config::ChannelRegistryChannelsConfig;
 use constellation_channels::config::CompoundEndpoint;
 use constellation_channels::config::ResolverConfig;
 use constellation_channels::far::compound::CompoundFarChannel;
-#[cfg(feature = "standalone")]
 use constellation_channels::far::compound::CompoundFarChannelThreadedFlows;
 use constellation_channels::far::compound::CompoundFarChannelXfrm;
 use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
