@@ -31,6 +31,8 @@ use std::str::Utf8Error;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+#[cfg(feature = "standalone")]
+use clap::ArgMatches;
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TestAuthN;
@@ -781,10 +783,12 @@ impl Standalone
     type RunCleanup = ConsensusComponentCleanup;
     type RunErrorCleanup = ();
 
-    const COMPONENT_NAME: &'static str = "consensus";
-    const CONFIG_FILES: &'static [&'static str] = &["consensus.conf"];
+    const COMPONENT_NAME: &str = "consensus";
+    const CONFIG_FILES: &[&str] = &["consensus.conf"];
+    const VERSION: &str = "0.0.0";
 
     fn create(
+        _args: ArgMatches,
         config: Self::Config
     ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
         let (name_caches_config, registry_config, consensus_config) =
