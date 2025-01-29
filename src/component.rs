@@ -31,6 +31,7 @@ use std::thread::JoinHandle;
 
 #[cfg(feature = "standalone")]
 use clap::ArgMatches;
+use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TestAuthN;
 use constellation_auth::cred::SSLCred;
