@@ -73,6 +73,9 @@ use constellation_common::net::Socket;
 use constellation_common::sched::DenseItemID;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
+use constellation_common::version::FullVersion;
+use constellation_common::version::Version;
+use constellation_common::version::VersionSuffix;
 use constellation_consensus_common::parties::StaticParties;
 use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoRounds;
@@ -785,7 +788,11 @@ impl Standalone
 
     const COMPONENT_NAME: &str = "consensus";
     const CONFIG_FILES: &[&str] = &["consensus.conf"];
-    const VERSION: &str = "0.0.0";
+    const VERSION: FullVersion = FullVersion::new(
+        None,
+        Version::new(0, 0, 0),
+        Some(VersionSuffix::Development)
+    );
 
     fn create(
         _args: ArgMatches,
