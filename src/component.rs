@@ -41,10 +41,10 @@ use constellation_channels::config::ChannelRegistryChannelsConfig;
 use constellation_channels::config::CompoundEndpoint;
 use constellation_channels::config::ResolverConfig;
 use constellation_channels::far::compound::CompoundFarChannel;
+use constellation_channels::far::compound::CompoundFarChannelSessionCred;
 use constellation_channels::far::compound::CompoundFarChannelThreadedFlows;
 use constellation_channels::far::compound::CompoundFarChannelXfrm;
 use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
-use constellation_channels::far::compound::CompoundFarCredential;
 use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::far::flows::OwnedFlowNegotiator;
 use constellation_channels::far::flows::OwnedFlowsCreate;
@@ -1036,11 +1036,14 @@ pub enum TestCred {
     Unix { addr: UnixSocketAddr }
 }
 
-impl<Basic> From<SSLCred<'_, CompoundFarCredential<'_, Basic>>> for TestCred
+impl<Basic> From<SSLCred<'_, CompoundFarChannelSessionCred<'_, Basic>>>
+    for TestCred
 where
     TestCred: From<Basic>
 {
-    fn from(_val: SSLCred<'_, CompoundFarCredential<'_, Basic>>) -> TestCred {
+    fn from(
+        _val: SSLCred<'_, CompoundFarChannelSessionCred<'_, Basic>>
+    ) -> TestCred {
         panic!("Not supported!")
     }
 }
@@ -1067,13 +1070,15 @@ impl From<CompoundFarChannelXfrmPeerAddr> for TestCred {
     }
 }
 
-impl<Basic> From<CompoundFarCredential<'_, Basic>> for TestCred
+impl<Basic> From<CompoundFarChannelSessionCred<'_, Basic>> for TestCred
 where
     TestCred: From<Basic>
 {
-    fn from(val: CompoundFarCredential<'_, Basic>) -> TestCred {
+    fn from(val: CompoundFarChannelSessionCred<'_, Basic>) -> TestCred {
         match val {
-            CompoundFarCredential::Basic { basic } => TestCred::from(basic),
+            CompoundFarChannelSessionCred::Basic { basic } => {
+                TestCred::from(basic)
+            }
             _ => panic!("Not supported!")
         }
     }
