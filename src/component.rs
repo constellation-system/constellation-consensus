@@ -60,6 +60,7 @@ use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
 use constellation_channels::unix::UnixSocketAddr;
+use constellation_common::codec::Codec;
 use constellation_common::codec::DatagramCodec;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
@@ -185,8 +186,8 @@ pub struct ConsensusComponent<
         + Sync,
     AuthN::Prin: 'static + Clone + Display + Eq + Hash + Send,
     MsgCodec: Clone + DatagramCodec<Proto::Msg> + Send,
-    <MsgCodec as DatagramCodec<Proto::Msg>>::Param: Default,
-    <MsgCodec as DatagramCodec<Proto::Msg>>::EncodeError:
+    <MsgCodec as Codec<Proto::Msg>>::Param: Default,
+    <MsgCodec as Codec<Proto::Msg>>::EncodeError:
         ErrorReportInfo<DenseItemID<usize>>,
     Channel:
         FarChannelOwnedFlows<F, AuthN, Xfrm> + FarChannelCreate + Send + Sync,
@@ -221,7 +222,7 @@ pub struct ConsensusComponent<
         + Send
         + Sync,
     Ctx::NameCaches: NSNameCachesCtx,
-    PrinCodec: Clone + DatagramCodec<AuthN::Prin> + Send,
+    PrinCodec: Clone + Codec<AuthN::Prin> + Send,
     PrinCodec::Param: Default,
     Endpoint: 'static + Send,
     Resolver: 'static
@@ -324,8 +325,8 @@ where
         + Sync,
     AuthN::Prin: 'static + Clone + Display + Eq + Hash + Send,
     MsgCodec: 'static + Clone + DatagramCodec<Proto::Msg> + Send,
-    <MsgCodec as DatagramCodec<Proto::Msg>>::Param: Default,
-    <MsgCodec as DatagramCodec<Proto::Msg>>::EncodeError:
+    <MsgCodec as Codec<Proto::Msg>>::Param: Default,
+    <MsgCodec as Codec<Proto::Msg>>::EncodeError:
         ErrorReportInfo<DenseItemID<usize>>,
     Channel: 'static
         + FarChannelOwnedFlows<F, AuthN, Xfrm>
@@ -380,7 +381,7 @@ where
         + Sync,
     Proto::Rounds: 'static + SharedMsgs<PartyStreamIdx, Proto::Msg> + Send,
     Ctx::NameCaches: NSNameCachesCtx,
-    PrinCodec: Clone + DatagramCodec<AuthN::Prin> + Send,
+    PrinCodec: Clone + Codec<AuthN::Prin> + Send,
     PrinCodec::Param: Default,
     Endpoint: 'static + Send,
     Resolver: 'static
@@ -841,13 +842,11 @@ impl ScopedError for StringPrincipalDecodeError {
     }
 }
 
-impl DatagramCodec<String> for StringPrincipalCodec {
+impl Codec<String> for StringPrincipalCodec {
     type CreateError = Infallible;
     type DecodeError = StringPrincipalDecodeError;
     type EncodeError = Infallible;
     type Param = ();
-
-    const MAX_BYTES: usize = 1024;
 
     #[inline]
     fn create(_param: Self::Param) -> Result<Self, Self::CreateError> {

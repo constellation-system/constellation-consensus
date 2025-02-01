@@ -25,7 +25,7 @@ use constellation_channels::config::CompoundXfrmCreateParam;
 use constellation_channels::config::ThreadedFlowsParams;
 use constellation_channels::config::ThreadedNSNameCachesConfig;
 #[cfg(feature = "standalone")]
-use constellation_common::codec::DatagramCodec;
+use constellation_common::codec::Codec;
 #[cfg(feature = "standalone")]
 use constellation_common::ids::AscendingCount;
 use constellation_common::ids::IDGen;
@@ -142,7 +142,7 @@ pub struct StandaloneConfig {
         (),
         PBFTConfig,
         ChannelRegistryChannelsConfig<
-            <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
+            <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
         >,
         <AscendingCount as IDGen>::Config,
         CompoundFarEndpoint
@@ -159,7 +159,7 @@ impl StandaloneConfig {
         (),
         PBFTConfig,
         ChannelRegistryChannelsConfig<
-            <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
+            <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
         >,
         <AscendingCount as IDGen>::Config,
         CompoundFarEndpoint
@@ -179,7 +179,7 @@ impl StandaloneConfig {
             (),
             PBFTConfig,
             ChannelRegistryChannelsConfig<
-                <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
+                <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
             >,
             <AscendingCount as IDGen>::Config,
             CompoundFarEndpoint
