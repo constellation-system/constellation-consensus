@@ -235,9 +235,7 @@ pub struct ConsensusComponent<
         + Hash
         + Into<Option<IPEndpointAddr>>
         + Send
-        + Sync,
-    [(); PrinCodec::MAX_BYTES]:,
-    [(); MsgCodec::MAX_BYTES]: {
+        + Sync {
     round_ids: RoundIDs,
     channel: PhantomData<Channel>,
     proto: PhantomData<Proto>,
@@ -409,8 +407,6 @@ where
         + Into<Option<IPEndpointAddr>>
         + Send
         + Sync,
-    [(); PrinCodec::MAX_BYTES]:,
-    [(); MsgCodec::MAX_BYTES]:
 {
     pub fn start(
         self
