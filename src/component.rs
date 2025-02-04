@@ -1,4 +1,4 @@
-// Copyright © 2024 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -235,9 +235,7 @@ pub struct ConsensusComponent<
         + Hash
         + Into<Option<IPEndpointAddr>>
         + Send
-        + Sync,
-    [(); PrinCodec::MAX_BYTES]:,
-    [(); MsgCodec::MAX_BYTES]: {
+        + Sync {
     round_ids: RoundIDs,
     channel: PhantomData<Channel>,
     proto: PhantomData<Proto>,
@@ -408,9 +406,7 @@ where
         + Hash
         + Into<Option<IPEndpointAddr>>
         + Send
-        + Sync,
-    [(); PrinCodec::MAX_BYTES]:,
-    [(); MsgCodec::MAX_BYTES]:
+        + Sync
 {
     pub fn start(
         self
