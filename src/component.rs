@@ -406,7 +406,7 @@ where
         + Hash
         + Into<Option<IPEndpointAddr>>
         + Send
-        + Sync,
+        + Sync
 {
     pub fn start(
         self
