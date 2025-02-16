@@ -37,7 +37,7 @@ use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TestAuthN;
 use constellation_auth::cred::SSLCred;
 use constellation_channels::config::ChannelRegistryChannelsConfig;
-use constellation_channels::config::CompoundEndpoint;
+use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::ResolverConfig;
 use constellation_channels::far::compound::CompoundFarChannel;
 use constellation_channels::far::compound::CompoundFarChannelSessionCred;
@@ -153,9 +153,9 @@ pub type CompoundConsensusComponent<Ctx, RoundIDs, Proto, MsgCodec, PrinCodec> =
         Arc<TestAuthN<String, TestCred>>,
         CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
         Ctx,
-        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundEndpoint>,
+        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>,
         PrinCodec,
-        CompoundEndpoint
+        CompoundFarEndpoint
     >;
 
 pub struct ConsensusComponent<
@@ -821,8 +821,8 @@ impl Standalone
                     for conn in party.party_config().connections() {
                         for endpoint in conn.endpoints() {
                             match endpoint {
-                                CompoundEndpoint::Unix { unix } => {
-                                    match UnixSocketAddr::try_from(unix) {
+                                CompoundFarEndpoint::Unix { unix_datagram } => {
+                                    match UnixSocketAddr::try_from(unix_datagram) {
                                         Ok(addr) => {
                                             let cred =
                                                 TestCred::Unix { addr: addr };
@@ -837,12 +837,12 @@ impl Standalone
                                         }
                                     }
                                 }
-                                CompoundEndpoint::IP { ip } => match ip
+                                CompoundFarEndpoint::UDP { udp } => match udp
                                     .ip_endpoint()
                                 {
                                     IPEndpointAddr::Addr(addr) => {
                                         let addr =
-                                            SocketAddr::new(*addr, ip.port());
+                                            SocketAddr::new(*addr, udp.port());
                                         let cred = TestCred::IP { addr: addr };
 
                                         authn_parties.push((cred, id.clone()));
