@@ -27,7 +27,6 @@ use std::iter::successors;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::str::from_utf8;
-use std::str::Utf8Error;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -65,6 +64,8 @@ use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
 use constellation_channels::unix::UnixSocketAddr;
 use constellation_common::codec::DatagramCodec;
+use constellation_common::error::ErrorScope;
+use constellation_common::error::ScopedError;
 use constellation_common::net::DatagramXfrm;
 use constellation_common::net::DatagramXfrmCreate;
 use constellation_common::net::IPEndpointAddr;
@@ -953,6 +954,24 @@ impl Standalone
     }
 }
 
+pub struct StringPrincipalDecodeError;
+
+impl Display for StringPrincipalDecodeError {
+    #[inline]
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        write!(f, "UTF-8 error")
+    }
+}
+
+impl ScopedError for StringPrincipalDecodeError {
+    fn scope(&self) -> ErrorScope {
+        ErrorScope::Unrecoverable
+    }
+}
+
 impl Display for PartyStreamIdx {
     #[inline]
     fn fmt(
@@ -965,7 +984,7 @@ impl Display for PartyStreamIdx {
 
 impl DatagramCodec<String> for StringPrincipalCodec {
     type CreateError = Infallible;
-    type DecodeError = Utf8Error;
+    type DecodeError = StringPrincipalDecodeError;
     type EncodeError = Infallible;
     type Param = ();
 
@@ -981,7 +1000,9 @@ impl DatagramCodec<String> for StringPrincipalCodec {
         buf: &[u8]
     ) -> Result<(String, usize), Self::DecodeError> {
         let len = buf.len();
-        let string = from_utf8(buf)?.to_string();
+        let string = from_utf8(buf)
+            .map_err(|_| StringPrincipalDecodeError)?
+            .to_string();
 
         Ok((string, len))
     }
@@ -1036,13 +1057,13 @@ pub enum TestCred {
     Unix { addr: UnixSocketAddr }
 }
 
-impl<Basic> From<SSLCred<'_, CompoundFarChannelSessionCred<'_, Basic>>>
+impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>>
     for TestCred
 where
     TestCred: From<Basic>
 {
     fn from(
-        _val: SSLCred<'_, CompoundFarChannelSessionCred<'_, Basic>>
+        _val: SSLCred<CompoundFarChannelSessionCred<Basic>>
     ) -> TestCred {
         panic!("Not supported!")
     }
@@ -1070,11 +1091,11 @@ impl From<CompoundFarChannelXfrmPeerAddr> for TestCred {
     }
 }
 
-impl<Basic> From<CompoundFarChannelSessionCred<'_, Basic>> for TestCred
+impl<Basic> From<CompoundFarChannelSessionCred<Basic>> for TestCred
 where
     TestCred: From<Basic>
 {
-    fn from(val: CompoundFarChannelSessionCred<'_, Basic>) -> TestCred {
+    fn from(val: CompoundFarChannelSessionCred<Basic>) -> TestCred {
         match val {
             CompoundFarChannelSessionCred::Basic { basic } => {
                 TestCred::from(basic)
