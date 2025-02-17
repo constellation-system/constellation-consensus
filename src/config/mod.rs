@@ -19,8 +19,8 @@
 #[cfg(feature = "standalone")]
 use constellation_channels::config::ChannelRegistryChannelsConfig;
 use constellation_channels::config::ChannelRegistryConfig;
-use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::CompoundFarChannelConfig;
+use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::CompoundXfrmCreateParam;
 use constellation_channels::config::ResolverConfig;
 use constellation_channels::config::ThreadedFlowsParams;

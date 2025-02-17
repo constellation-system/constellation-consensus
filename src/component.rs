@@ -822,7 +822,9 @@ impl Standalone
                         for endpoint in conn.endpoints() {
                             match endpoint {
                                 CompoundFarEndpoint::Unix { unix_datagram } => {
-                                    match UnixSocketAddr::try_from(unix_datagram) {
+                                    match UnixSocketAddr::try_from(
+                                        unix_datagram
+                                    ) {
                                         Ok(addr) => {
                                             let cred =
                                                 TestCred::Unix { addr: addr };
@@ -1057,14 +1059,11 @@ pub enum TestCred {
     Unix { addr: UnixSocketAddr }
 }
 
-impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>>
-    for TestCred
+impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>> for TestCred
 where
     TestCred: From<Basic>
 {
-    fn from(
-        _val: SSLCred<CompoundFarChannelSessionCred<Basic>>
-    ) -> TestCred {
+    fn from(_val: SSLCred<CompoundFarChannelSessionCred<Basic>>) -> TestCred {
         panic!("Not supported!")
     }
 }
