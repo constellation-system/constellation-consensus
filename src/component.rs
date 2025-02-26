@@ -27,22 +27,23 @@ use std::iter::successors;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::str::from_utf8;
-use std::str::Utf8Error;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+#[cfg(feature = "standalone")]
+use clap::ArgMatches;
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TestAuthN;
 use constellation_auth::cred::SSLCred;
 use constellation_channels::config::ChannelRegistryChannelsConfig;
-use constellation_channels::config::CompoundEndpoint;
+use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::ResolverConfig;
 use constellation_channels::far::compound::CompoundFarChannel;
+use constellation_channels::far::compound::CompoundFarChannelSessionCred;
 use constellation_channels::far::compound::CompoundFarChannelThreadedFlows;
 use constellation_channels::far::compound::CompoundFarChannelXfrm;
 use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
-use constellation_channels::far::compound::CompoundFarCredential;
 use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::far::flows::OwnedFlowNegotiator;
 use constellation_channels::far::flows::OwnedFlowsCreate;
@@ -63,6 +64,8 @@ use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
 use constellation_channels::unix::UnixSocketAddr;
 use constellation_common::codec::DatagramCodec;
+use constellation_common::error::ErrorScope;
+use constellation_common::error::ScopedError;
 use constellation_common::net::DatagramXfrm;
 use constellation_common::net::DatagramXfrmCreate;
 use constellation_common::net::IPEndpointAddr;
@@ -71,6 +74,9 @@ use constellation_common::net::Socket;
 use constellation_common::sched::DenseItemID;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
+use constellation_common::version::FullVersion;
+use constellation_common::version::Version;
+use constellation_common::version::VersionSuffix;
 use constellation_consensus_common::parties::StaticParties;
 use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoRounds;
@@ -147,9 +153,9 @@ pub type CompoundConsensusComponent<Ctx, RoundIDs, Proto, MsgCodec, PrinCodec> =
         Arc<TestAuthN<String, TestCred>>,
         CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
         Ctx,
-        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundEndpoint>,
+        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>,
         PrinCodec,
-        CompoundEndpoint
+        CompoundFarEndpoint
     >;
 
 pub struct ConsensusComponent<
@@ -777,10 +783,16 @@ impl Standalone
     type RunCleanup = ConsensusComponentCleanup;
     type RunErrorCleanup = ();
 
-    const COMPONENT_NAME: &'static str = "consensus";
-    const CONFIG_FILES: &'static [&'static str] = &["consensus.conf"];
+    const COMPONENT_NAME: &str = "consensus";
+    const CONFIG_FILES: &[&str] = &["consensus.conf"];
+    const VERSION: FullVersion = FullVersion::new(
+        None,
+        Version::new(0, 0, 0),
+        Some(VersionSuffix::Development)
+    );
 
     fn create(
+        _args: ArgMatches,
         config: Self::Config
     ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
         let (name_caches_config, registry_config, consensus_config) =
@@ -809,8 +821,10 @@ impl Standalone
                     for conn in party.party_config().connections() {
                         for endpoint in conn.endpoints() {
                             match endpoint {
-                                CompoundEndpoint::Unix { unix } => {
-                                    match UnixSocketAddr::try_from(unix) {
+                                CompoundFarEndpoint::Unix { unix_datagram } => {
+                                    match UnixSocketAddr::try_from(
+                                        unix_datagram
+                                    ) {
                                         Ok(addr) => {
                                             let cred =
                                                 TestCred::Unix { addr: addr };
@@ -825,12 +839,12 @@ impl Standalone
                                         }
                                     }
                                 }
-                                CompoundEndpoint::IP { ip } => match ip
+                                CompoundFarEndpoint::UDP { udp } => match udp
                                     .ip_endpoint()
                                 {
                                     IPEndpointAddr::Addr(addr) => {
                                         let addr =
-                                            SocketAddr::new(*addr, ip.port());
+                                            SocketAddr::new(*addr, udp.port());
                                         let cred = TestCred::IP { addr: addr };
 
                                         authn_parties.push((cred, id.clone()));
@@ -942,6 +956,24 @@ impl Standalone
     }
 }
 
+pub struct StringPrincipalDecodeError;
+
+impl Display for StringPrincipalDecodeError {
+    #[inline]
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        write!(f, "UTF-8 error")
+    }
+}
+
+impl ScopedError for StringPrincipalDecodeError {
+    fn scope(&self) -> ErrorScope {
+        ErrorScope::Unrecoverable
+    }
+}
+
 impl Display for PartyStreamIdx {
     #[inline]
     fn fmt(
@@ -954,7 +986,7 @@ impl Display for PartyStreamIdx {
 
 impl DatagramCodec<String> for StringPrincipalCodec {
     type CreateError = Infallible;
-    type DecodeError = Utf8Error;
+    type DecodeError = StringPrincipalDecodeError;
     type EncodeError = Infallible;
     type Param = ();
 
@@ -970,7 +1002,9 @@ impl DatagramCodec<String> for StringPrincipalCodec {
         buf: &[u8]
     ) -> Result<(String, usize), Self::DecodeError> {
         let len = buf.len();
-        let string = from_utf8(buf)?.to_string();
+        let string = from_utf8(buf)
+            .map_err(|_| StringPrincipalDecodeError)?
+            .to_string();
 
         Ok((string, len))
     }
@@ -1025,11 +1059,11 @@ pub enum TestCred {
     Unix { addr: UnixSocketAddr }
 }
 
-impl<Basic> From<SSLCred<'_, CompoundFarCredential<'_, Basic>>> for TestCred
+impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>> for TestCred
 where
     TestCred: From<Basic>
 {
-    fn from(_val: SSLCred<'_, CompoundFarCredential<'_, Basic>>) -> TestCred {
+    fn from(_val: SSLCred<CompoundFarChannelSessionCred<Basic>>) -> TestCred {
         panic!("Not supported!")
     }
 }
@@ -1056,13 +1090,15 @@ impl From<CompoundFarChannelXfrmPeerAddr> for TestCred {
     }
 }
 
-impl<Basic> From<CompoundFarCredential<'_, Basic>> for TestCred
+impl<Basic> From<CompoundFarChannelSessionCred<Basic>> for TestCred
 where
     TestCred: From<Basic>
 {
-    fn from(val: CompoundFarCredential<'_, Basic>) -> TestCred {
+    fn from(val: CompoundFarChannelSessionCred<Basic>) -> TestCred {
         match val {
-            CompoundFarCredential::Basic { basic } => TestCred::from(basic),
+            CompoundFarChannelSessionCred::Basic { basic } => {
+                TestCred::from(basic)
+            }
             _ => panic!("Not supported!")
         }
     }

@@ -19,8 +19,8 @@
 #[cfg(feature = "standalone")]
 use constellation_channels::config::ChannelRegistryChannelsConfig;
 use constellation_channels::config::ChannelRegistryConfig;
-use constellation_channels::config::CompoundEndpoint;
 use constellation_channels::config::CompoundFarChannelConfig;
+use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::CompoundXfrmCreateParam;
 use constellation_channels::config::ResolverConfig;
 use constellation_channels::config::ThreadedFlowsParams;
@@ -230,7 +230,7 @@ pub struct StandaloneConfig {
         ChannelRegistryChannelsConfig<
             <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
         >,
-        CompoundEndpoint
+        CompoundFarEndpoint
     >
 }
 
@@ -246,7 +246,7 @@ impl StandaloneConfig {
         ChannelRegistryChannelsConfig<
             <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
         >,
-        CompoundEndpoint
+        CompoundFarEndpoint
     > {
         &self.consensus
     }
@@ -265,7 +265,7 @@ impl StandaloneConfig {
             ChannelRegistryChannelsConfig<
                 <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
             >,
-            CompoundEndpoint
+            CompoundFarEndpoint
         >
     ) {
         (self.name_caches, self.registry, self.consensus)
