@@ -26,13 +26,12 @@ use std::sync::RwLock;
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_common::error::MutexPoison;
 use constellation_common::sync::Notify;
+use constellation_component_common::PartyStreamIdx;
 use constellation_consensus_common::round::RoundMsg;
 use constellation_consensus_common::round::RoundsRecv;
 use constellation_consensus_common::state::RoundResultReporter;
 use log::error;
 use log::warn;
-
-use crate::component::PartyStreamIdx;
 
 pub(crate) struct ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
 where

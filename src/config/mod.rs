@@ -22,165 +22,72 @@ use constellation_channels::config::ChannelRegistryConfig;
 use constellation_channels::config::CompoundFarChannelConfig;
 use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::CompoundXfrmCreateParam;
-use constellation_channels::config::ResolverConfig;
 use constellation_channels::config::ThreadedFlowsParams;
 use constellation_channels::config::ThreadedNSNameCachesConfig;
 #[cfg(feature = "standalone")]
 use constellation_common::codec::DatagramCodec;
+#[cfg(feature = "standalone")]
+use constellation_common::ids::AscendingCount;
+use constellation_common::ids::IDGen;
+use constellation_component_common::config::MulticastConfig;
 #[cfg(feature = "standalone")]
 use constellation_pbft::config::PBFTConfig;
 #[cfg(feature = "standalone")]
 use constellation_pbft::msgs::PBFTMsgPERCodec;
 #[cfg(feature = "standalone")]
 use constellation_pbft::msgs::PbftMsg;
-use constellation_streams::config::BatchSlotsConfig;
-use constellation_streams::config::PartyConfig;
 use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
 #[serde(rename = "consensus-pool")]
 #[serde(rename_all = "kebab-case")]
-pub struct ConsensusConfig<PartyID, PartyCodec, Proto, Channels, Endpoint>
-where
+pub struct ConsensusConfig<
+    PartyID,
+    PartyCodec,
+    Proto,
+    Channels,
+    Epochs,
+    Endpoint
+> where
     PartyCodec: Default,
     Channels: Default,
-    Proto: Default {
+    Proto: Default,
+    Epochs: Default {
     #[serde(default)]
     proto: Proto,
-    #[serde(flatten)]
-    multicast: MulticastConfig<PartyID, PartyCodec, Channels, Endpoint>
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
-#[serde(rename = "multicast")]
-#[serde(rename_all = "kebab-case")]
-pub struct MulticastConfig<PartyID, PartyCodec, Channels, Endpoint>
-where
-    PartyCodec: Default,
-    Channels: Default {
-    #[serde(flatten)]
-    #[serde(default)]
-    slots: BatchSlotsConfig,
     /// Party identitfying this node.
     #[serde(rename = "self")]
     self_party: PartyID,
     #[serde(default)]
     party_codec: PartyCodec,
     #[serde(flatten)]
-    parties: PartiesConfig<PartyID, Channels, Endpoint>
+    multicast: MulticastConfig<PartyID, Channels, Epochs, Endpoint>
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
-#[serde(rename = "static-parties")]
-#[serde(rename_all = "kebab-case")]
-pub struct StaticPartyConfig<PartyID, Channels, Endpoint>
-where
-    Channels: Default {
-    party: PartyID,
-    #[serde(flatten)]
-    config: PartyConfig<ResolverConfig, Channels, String, Endpoint>
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
-#[serde(untagged)]
-pub enum PartiesConfig<PartyID, Channels, Endpoint>
-where
-    Channels: Default {
-    Static {
-        #[serde(rename = "static")]
-        stat: Vec<StaticPartyConfig<PartyID, Channels, Endpoint>>
-    }
-}
-impl<PartyID, PartyCodec, Channels, Endpoint>
-    MulticastConfig<PartyID, PartyCodec, Channels, Endpoint>
-where
-    PartyCodec: Default,
-    Channels: Default
-{
-    #[inline]
-    pub fn create(
-        self_party: PartyID,
-        party_codec: PartyCodec,
-        slots: BatchSlotsConfig,
-        parties: PartiesConfig<PartyID, Channels, Endpoint>
-    ) -> MulticastConfig<PartyID, PartyCodec, Channels, Endpoint> {
-        MulticastConfig {
-            party_codec: party_codec,
-            self_party: self_party,
-            slots: slots,
-            parties: parties
-        }
-    }
-
-    #[inline]
-    pub fn parties(&self) -> &PartiesConfig<PartyID, Channels, Endpoint> {
-        &self.parties
-    }
-
-    #[inline]
-    pub fn take(
-        self
-    ) -> (
-        PartyID,
-        PartyCodec,
-        BatchSlotsConfig,
-        PartiesConfig<PartyID, Channels, Endpoint>
-    ) {
-        (self.self_party, self.party_codec, self.slots, self.parties)
-    }
-}
-
-impl<PartyID, Channels, Endpoint> StaticPartyConfig<PartyID, Channels, Endpoint>
-where
-    Channels: Default
-{
-    #[inline]
-    pub fn create(
-        party: PartyID,
-        config: PartyConfig<ResolverConfig, Channels, String, Endpoint>
-    ) -> StaticPartyConfig<PartyID, Channels, Endpoint> {
-        StaticPartyConfig {
-            party: party,
-            config: config
-        }
-    }
-
-    #[inline]
-    pub fn party(&self) -> &PartyID {
-        &self.party
-    }
-
-    #[inline]
-    pub fn party_config(
-        &self
-    ) -> &PartyConfig<ResolverConfig, Channels, String, Endpoint> {
-        &self.config
-    }
-
-    #[inline]
-    pub fn take(
-        self
-    ) -> (
-        PartyID,
-        PartyConfig<ResolverConfig, Channels, String, Endpoint>
-    ) {
-        (self.party, self.config)
-    }
-}
-
-impl<PartyID, PartyCodec, Proto, Channels, Endpoint>
-    ConsensusConfig<PartyID, PartyCodec, Proto, Channels, Endpoint>
+impl<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>
+    ConsensusConfig<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>
 where
     PartyCodec: Default,
     Channels: Default,
-    Proto: Default
+    Proto: Default,
+    Epochs: Default
 {
     #[inline]
     pub fn multicast(
         &self
-    ) -> &MulticastConfig<PartyID, PartyCodec, Channels, Endpoint> {
+    ) -> &MulticastConfig<PartyID, Channels, Epochs, Endpoint> {
         &self.multicast
+    }
+
+    #[inline]
+    pub fn self_party(&self) -> &PartyID {
+        &self.self_party
+    }
+
+    #[inline]
+    pub fn party_codec(&self) -> &PartyCodec {
+        &self.party_codec
     }
 
     #[inline]
@@ -193,9 +100,16 @@ where
         self
     ) -> (
         Proto,
-        MulticastConfig<PartyID, PartyCodec, Channels, Endpoint>
+        PartyID,
+        PartyCodec,
+        MulticastConfig<PartyID, Channels, Epochs, Endpoint>
     ) {
-        (self.proto, self.multicast)
+        (
+            self.proto,
+            self.self_party,
+            self.party_codec,
+            self.multicast
+        )
     }
 }
 
@@ -230,6 +144,7 @@ pub struct StandaloneConfig {
         ChannelRegistryChannelsConfig<
             <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
         >,
+        <AscendingCount as IDGen>::Config,
         CompoundFarEndpoint
     >
 }
@@ -246,6 +161,7 @@ impl StandaloneConfig {
         ChannelRegistryChannelsConfig<
             <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
         >,
+        <AscendingCount as IDGen>::Config,
         CompoundFarEndpoint
     > {
         &self.consensus
@@ -265,6 +181,7 @@ impl StandaloneConfig {
             ChannelRegistryChannelsConfig<
                 <PBFTMsgPERCodec as DatagramCodec<PbftMsg>>::Param
             >,
+            <AscendingCount as IDGen>::Config,
             CompoundFarEndpoint
         >
     ) {

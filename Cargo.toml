@@ -37,10 +37,12 @@ required-features = ["standalone"]
 
 [features]
 default = ["dtls", "gssapi", "log", "openssl", "socks5", "standalone", "tls", "unix"]
-dtls = ["constellation-channels/dtls"]
+dtls = ["constellation-channels/dtls",
+        "constellation-component-common/dtls"]
 gssapi = ["constellation-auth/gssapi",
           "constellation-channels/gssapi",
           "constellation-common/gssapi",
+          "constellation-component-common/gssapi",
           "constellation-consensus-common/gssapi",
           "constellation-standalone/gssapi",
           "constellation-streams/gssapi"]
@@ -48,6 +50,7 @@ log = ["dep:log",
        "constellation-auth/log",
        "constellation-channels/log",
        "constellation-common/log",
+       "constellation-component-common/log",
        "constellation-consensus-common/log",
        "constellation-pbft/log",
        "constellation-standalone?/log",
@@ -55,16 +58,20 @@ log = ["dep:log",
 openssl = ["constellation-auth/openssl",
            "constellation-channels/openssl",
            "constellation-common/openssl",
+           "constellation-component-common/openssl",
            "constellation-consensus-common/openssl",
            "constellation-standalone/openssl",
            "constellation-streams/openssl"]
-socks5 = ["constellation-channels/socks5"]
+socks5 = ["constellation-channels/socks5",
+          "constellation-component-common/socks5"]
 standalone = ["dep:constellation-standalone",
               "dep:constellation-pbft"]
-tls = ["constellation-channels/tls"]
+tls = ["constellation-channels/tls",
+       "constellation-component-common/tls"]
 unix = ["constellation-auth/unix",
         "constellation-channels/unix",
         "constellation-common/unix",
+        "constellation-component-common/unix",
         "constellation-standalone/unix",
         "constellation-streams/unix"]
 
@@ -73,6 +80,7 @@ clap = { version = "4.5", features = ["cargo","string"] }
 constellation-auth = { git = "https://github.com/constellation-system/constellation-auth.git", branch = "project/ioc", default-features = false }
 constellation-channels = { git = "https://github.com/constellation-system/constellation-channels.git", branch = "project/ioc", default-features = false }
 constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "project/ioc", default-features = false }
+constellation-component-common = { git = "https://github.com/constellation-system/constellation-component-common.git", branch = "project/ioc", default-features = false }
 constellation-consensus-common = { git = "https://github.com/constellation-system/constellation-consensus-common.git", branch = "project/ioc", default-features = false }
 constellation-pbft = { git = "https://github.com/constellation-system/constellation-pbft.git", branch = "project/ioc", default-features = false, optional = true }
 constellation-standalone = { git = "https://github.com/constellation-system/constellation-standalone.git", branch = "project/ioc", default-features = false, optional = true }

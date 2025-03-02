@@ -18,7 +18,7 @@
 
 //! Standalone consensus component.
 use constellation_consensus::component::CompoundConsensusComponent;
-use constellation_standalone::Standalone;
+use constellation_standalone::StandaloneService;
 
 fn main() {
     CompoundConsensusComponent::main()
