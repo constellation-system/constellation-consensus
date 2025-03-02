@@ -23,7 +23,6 @@ use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
 use std::hash::Hash;
-use std::iter::successors;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::str::from_utf8;
@@ -32,7 +31,6 @@ use std::thread::JoinHandle;
 
 #[cfg(feature = "standalone")]
 use clap::ArgMatches;
-use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TestAuthN;
 use constellation_auth::cred::SSLCred;
@@ -48,10 +46,8 @@ use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::far::flows::OwnedFlowNegotiator;
 use constellation_channels::far::flows::OwnedFlowsCreate;
 use constellation_channels::far::flows::ThreadedFlowsListener;
-use constellation_channels::far::flows::ThreadedFlowsPullStreamListener;
 #[cfg(feature = "standalone")]
 use constellation_channels::far::registry::CompoundFarChannelRegistry;
-use constellation_channels::far::registry::FarChannelRegistryChannels;
 use constellation_channels::far::registry::FarChannelRegistryCtx;
 use constellation_channels::far::registry::FarChannelRegistryID;
 use constellation_channels::far::udp::UDPDatagramXfrm;
@@ -66,6 +62,8 @@ use constellation_channels::unix::UnixSocketAddr;
 use constellation_common::codec::DatagramCodec;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
+use constellation_common::ids::AscendingCount;
+use constellation_common::ids::IDGen;
 use constellation_common::net::DatagramXfrm;
 use constellation_common::net::DatagramXfrmCreate;
 use constellation_common::net::IPEndpointAddr;
@@ -77,6 +75,10 @@ use constellation_common::sync::Notify;
 use constellation_common::version::FullVersion;
 use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
+use constellation_component_common::comm::multicast::MulticastComm;
+use constellation_component_common::comm::multicast::MulticastCommCleanup;
+use constellation_component_common::config::PartiesConfig;
+use constellation_component_common::PartyStreamIdx;
 use constellation_consensus_common::parties::StaticParties;
 use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoRounds;
@@ -90,18 +92,13 @@ use constellation_pbft::msgs::PBFTMsgPERCodec;
 use constellation_pbft::proto::PBFTProto;
 #[cfg(feature = "standalone")]
 use constellation_standalone::Standalone;
+#[cfg(feature = "standalone")]
+use constellation_standalone::StandaloneService;
 use constellation_streams::addrs::Addrs;
 use constellation_streams::addrs::AddrsCreate;
 use constellation_streams::channels::ChannelParam;
 use constellation_streams::error::ErrorReportInfo;
-use constellation_streams::multicast::StreamMulticaster;
-use constellation_streams::select::StreamSelector;
-use constellation_streams::stream::pull::PullStreams;
-use constellation_streams::stream::pull::PullStreamsReporter;
-use constellation_streams::stream::push::PushStreamSharedThread;
 use constellation_streams::stream::ConcurrentStream;
-use constellation_streams::stream::PushStreamParties;
-use constellation_streams::stream::PushStreamReporter;
 use constellation_streams::stream::StreamID;
 use log::debug;
 use log::error;
@@ -109,18 +106,10 @@ use log::info;
 use log::warn;
 
 use crate::config::ConsensusConfig;
-use crate::config::PartiesConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
 use crate::recv::ConsensusAuthNRecv;
 use crate::state::StateThread;
-
-/// Index used to identify principals in the stream.
-///
-/// These correspond one-to-one with consensus parties, but not all
-/// parties may be present in a given round.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PartyStreamIdx(usize);
 
 /// Index used to identify parties in a given round.
 ///
@@ -132,36 +121,38 @@ pub struct PartyRoundIdx(usize);
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StringPrincipalCodec;
 
-// ISSUE #2: this is temporary, and will be replaced with a random
-// number stream.
-pub struct AscendingCount {
-    curr: u128
-}
-
-pub type CompoundConsensusComponent<Ctx, RoundIDs, Proto, MsgCodec, PrinCodec> =
-    ConsensusComponent<
-        RoundIDs,
-        Proto,
-        MsgCodec,
-        CompoundFarChannel,
-        CompoundFarChannelThreadedFlows<
-            Arc<TestAuthN<String, TestCred>>,
-            UnixDatagramXfrm,
-            UDPDatagramXfrm,
-            FarChannelRegistryID
-        >,
+pub type CompoundConsensusComponent<
+    Ctx,
+    RoundIDs,
+    Epochs,
+    Proto,
+    MsgCodec,
+    PrinCodec
+> = ConsensusComponent<
+    RoundIDs,
+    Proto,
+    MsgCodec,
+    Epochs,
+    CompoundFarChannel,
+    CompoundFarChannelThreadedFlows<
         Arc<TestAuthN<String, TestCred>>,
-        CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
-        Ctx,
-        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>,
-        PrinCodec,
-        CompoundFarEndpoint
-    >;
+        UnixDatagramXfrm,
+        UDPDatagramXfrm,
+        FarChannelRegistryID
+    >,
+    Arc<TestAuthN<String, TestCred>>,
+    CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
+    Ctx,
+    MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>,
+    PrinCodec,
+    CompoundFarEndpoint
+>;
 
 pub struct ConsensusComponent<
     RoundIDs,
     Proto,
     MsgCodec,
+    Epochs,
     Channel,
     F,
     AuthN,
@@ -173,6 +164,20 @@ pub struct ConsensusComponent<
 > where
     RoundIDs: 'static + Iterator + Send,
     RoundIDs::Item: Clone + Display + Ord + Send,
+    Epochs: 'static + IDGen + Iterator + Send,
+    Epochs::Item: Clone + Default + Display + Ord + Send,
+    Proto: ConsensusProto<AuthN::Prin, PrinCodec>
+        + ConsensusProtoRounds<
+            RoundIDs,
+            PartyStreamIdx,
+            AuthN::Prin,
+            PrinCodec,
+            StaticParties<PartyStreamIdx>
+        > + Send,
+    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper: Send,
+    Proto::Rounds: SharedMsgs<PartyStreamIdx, Proto::Msg> + Send,
+    Proto::Msg: Clone + Debug + Send,
+    Proto::Out: Send,
     AuthN: Clone
         + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
         + Send
@@ -209,23 +214,11 @@ pub struct ConsensusComponent<
         DatagramXfrm + DatagramXfrmCreate<Addr = Channel::Param> + Send + Sync,
     Xfrm::CreateParam: Clone + Default + Send + Sync,
     Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
-    Proto: ConsensusProto<AuthN::Prin, PrinCodec>
-        + ConsensusProtoRounds<
-            RoundIDs,
-            PartyStreamIdx,
-            AuthN::Prin,
-            PrinCodec,
-            StaticParties<PartyStreamIdx>
-        > + Send,
-    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper: Send,
-    Proto::Msg: Clone + Debug + Send,
-    Proto::Out: Send,
     Ctx: 'static
         + FarChannelRegistryCtx<Channel, F, AuthN, Xfrm>
         + NSNameCachesCtx
         + Send
         + Sync,
-    Proto::Rounds: SharedMsgs<PartyStreamIdx, Proto::Msg> + Send,
     Ctx::NameCaches: NSNameCachesCtx,
     PrinCodec: Clone + DatagramCodec<AuthN::Prin> + Send,
     PrinCodec::Param: Default,
@@ -242,17 +235,18 @@ pub struct ConsensusComponent<
         + Into<Option<IPEndpointAddr>>
         + Send
         + Sync {
-    round_ids: RoundIDs,
     channel: PhantomData<Channel>,
     proto: PhantomData<Proto>,
     flow: PhantomData<F>,
     xfrm: PhantomData<Xfrm>,
     resolver: PhantomData<Resolver>,
+    round_ids: RoundIDs,
     config: ConsensusConfig<
         AuthN::Prin,
         PrinCodec::Param,
         Proto::Config,
         ChannelRegistryChannelsConfig<MsgCodec::Param>,
+        Epochs::Config,
         Endpoint
     >,
     listener: ThreadedFlowsListener<
@@ -269,28 +263,12 @@ pub struct ConsensusComponent<
 }
 
 pub struct ConsensusComponentCleanup {
-    notify: Notify,
     shutdown: ShutdownFlag,
-    sender_join: JoinHandle<()>,
-    pull_join: JoinHandle<()>,
+    multicast: MulticastCommCleanup,
     state_join: JoinHandle<()>
 }
 
 pub struct ConsensusComponentRunError;
-
-impl From<usize> for PartyStreamIdx {
-    #[inline]
-    fn from(val: usize) -> PartyStreamIdx {
-        PartyStreamIdx(val)
-    }
-}
-
-impl From<PartyStreamIdx> for usize {
-    #[inline]
-    fn from(val: PartyStreamIdx) -> usize {
-        val.0
-    }
-}
 
 impl From<usize> for PartyRoundIdx {
     #[inline]
@@ -310,6 +288,7 @@ impl<
         RoundIDs,
         Proto,
         MsgCodec,
+        Epochs,
         Channel,
         F,
         AuthN,
@@ -323,6 +302,7 @@ impl<
         RoundIDs,
         Proto,
         MsgCodec,
+        Epochs,
         Channel,
         F,
         AuthN,
@@ -335,6 +315,7 @@ impl<
 where
     RoundIDs: 'static + Iterator + Send,
     RoundIDs::Item: Clone + Display + Ord + Send,
+    Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     AuthN: 'static
         + Clone
         + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
@@ -420,7 +401,7 @@ where
         let ConsensusComponent {
             config,
             listener,
-            mut ctx,
+            ctx,
             shutdown,
             round_ids,
             ..
@@ -429,37 +410,8 @@ where
         info!(target: "consensus-component",
               "starting consensus component");
 
-        debug!(target: "consensus-component",
-               "initializing channels");
-
-        // Bring up all channels.
-        if let Err(err) = ctx.far_channel_registry().acquire_all(&mut ctx) {
-            error!(target: "consensus-component",
-                   "error initializing channel registry: {}",
-                   err);
-
-            return Err(ConsensusComponentRunError);
-        }
-
-        // Bring up the pull-side.
-        debug!(target: "consensus-component",
-               "initializing pull streams");
-
-        let (proto_config, multicast_config) = config.take();
-        let (self_party, prin_codec_param, slots_config, parties_config) =
-            multicast_config.take();
-
-        // ISSUE #5: get the codec config properly
-        let msg_codec = match MsgCodec::create(MsgCodec::Param::default()) {
-            Ok(codec) => codec,
-            Err(err) => {
-                error!(target: "consensus-component",
-                       "error creating message codec: {}",
-                       err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
+        let (proto_config, self_party, prin_codec_param, multicast_config) =
+            config.take();
         let prin_codec = match PrinCodec::create(prin_codec_param) {
             Ok(codec) => codec,
             Err(err) => {
@@ -506,97 +458,39 @@ where
             rounds.clone(),
             notify.clone()
         );
-        let listener =
-            ThreadedFlowsPullStreamListener::create(listener, msg_codec);
-        let (pull_streams, pull_listener) = PullStreams::with_capacity(
+        let multicast: MulticastComm<
+            _,
+            MsgCodec,
+            _,
+            _,
+            Epochs,
+            _,
+            _,
+            _,
+            _,
+            Resolver,
+            _,
+            _
+        > = match MulticastComm::create(
+            self_party.clone(),
+            multicast_config,
             listener,
-            authn_msg_recv.clone(),
+            ctx,
             shutdown.clone(),
-            PassthruMsgAuthN::default(),
-            1
-        );
-        let stream_reporter = pull_streams.reporter();
+            notify,
+            authn_msg_recv.clone(),
+            rounds.clone()
+        ) {
+            Ok(multicast) => multicast,
+            Err(err) => {
+                error!(target: "consensus-component",
+                           "error creating consensus multicast comm: {}",
+                           err);
 
-        // Bring up the push-side.
-        debug!(target: "consensus-component",
-               "initializing push streams");
-
-        let stream = match parties_config {
-            PartiesConfig::Static { stat } => {
-                let mut party_streams = Vec::with_capacity(stat.len());
-
-                for party in stat {
-                    let (party, party_config) = party.take();
-
-                    let mut stream = match StreamSelector::<
-                        _,
-                        FarChannelRegistryChannels<
-                            Proto::Msg,
-                            MsgCodec,
-                            PullStreamsReporter<Proto::Msg, _, _, _, _>,
-                            Channel,
-                            F,
-                            AuthN,
-                            Xfrm
-                        >,
-                        Resolver,
-                        Ctx
-                    >::create(
-                        &mut ctx,
-                        shutdown.clone(),
-                        stream_reporter.clone(),
-                        party_config,
-                        successors(Some(0), |n| Some(n + 1))
-                    ) {
-                        Ok(stream_multiplexer) => stream_multiplexer,
-                        Err(err) => {
-                            error!(target: "consensus-component",
-                                       "error creating stream multiplexer: {}",
-                                       err);
-
-                            return Err(ConsensusComponentRunError);
-                        }
-                    };
-                    // Refresh the streams to ensure no bad stream reporting.
-                    if let Err(err) = stream.refresh(&mut ctx) {
-                        error!(target: "consensus-component",
-                               "error doing initial stream refresh: {}",
-                               err);
-
-                        return Err(ConsensusComponentRunError);
-                    }
-
-                    party_streams.push((party, stream))
-                }
-
-                let stream: StreamMulticaster<
-                    AuthN::Prin,
-                    PartyStreamIdx,
-                    Proto::Msg,
-                    StreamSelector<
-                        _,
-                        FarChannelRegistryChannels<
-                            Proto::Msg,
-                            MsgCodec,
-                            PullStreamsReporter<Proto::Msg, _, _, _, _>,
-                            Channel,
-                            F,
-                            AuthN,
-                            Xfrm
-                        >,
-                        Resolver,
-                        Ctx
-                    >,
-                    Ctx
-                > = StreamMulticaster::create(
-                    party_streams.into_iter(),
-                    slots_config
-                );
-
-                stream
+                return Err(ConsensusComponentRunError);
             }
         };
-        let party_data = match stream.parties() {
+        let party_data = match multicast.parties() {
             Ok(parties) => {
                 let mut parties: Vec<(PartyStreamIdx, AuthN::Prin)> =
                     parties.collect();
@@ -640,7 +534,7 @@ where
             return Err(ConsensusComponentRunError);
         }
 
-        let party_iter = match stream.parties() {
+        let party_iter = match multicast.parties() {
             Ok(party_iter) => party_iter,
             // This is here as a placeholder; this type is
             // uninhabited, and Rust > 1.81 clippy generates an error
@@ -652,28 +546,17 @@ where
             error!("error setting parties: {}", err);
         }
 
-        debug!(target: "consensus-component",
-               "starting pull listener");
-
-        let stream_reporter = stream.reporter(stream_reporter);
         let state_join = state.start(rounds.clone());
-        let pull_join = pull_listener.start(stream_reporter);
-        let sender = PushStreamSharedThread::create(
-            ctx,
-            rounds,
-            notify.clone(),
-            stream,
-            shutdown.clone()
-        );
-        let notify = sender.notify();
-        let sender_join = sender.start();
+
+        debug!(target: "consensus-component",
+               "starting multicaster");
+
+        let multicast_cleanup = multicast.start();
 
         Ok(ConsensusComponentCleanup {
-            notify: notify,
             shutdown: shutdown,
-            sender_join: sender_join,
-            state_join: state_join,
-            pull_join: pull_join
+            multicast: multicast_cleanup,
+            state_join: state_join
         })
     }
 }
@@ -681,28 +564,7 @@ where
 impl ConsensusComponentCleanup {
     pub fn cleanup(mut self) {
         self.shutdown.set();
-
-        if let Err(err) = self.notify.notify() {
-            error!(target: "consensus-component-cleanup",
-                   "error notifying sender: {}",
-                   err)
-        }
-
-        debug!(target: "consensus-component-cleanup",
-               "joining sender");
-
-        if self.sender_join.join().is_err() {
-            error!(target: "consensus-component-cleanup",
-                   "error joining sender")
-        }
-
-        debug!(target: "consensus-component-cleanup",
-               "joining pull streams");
-
-        if self.pull_join.join().is_err() {
-            error!(target: "consensus-component-cleanup",
-                   "error joining pull streams listener")
-        }
+        self.multicast.cleanup();
 
         debug!(target: "consensus-component-cleanup",
                "joining state thread");
@@ -768,10 +630,13 @@ impl
     }
 }
 
+// ISSUE #2: AscendingCount is temporary, and will be replaced with a random
+// number stream.
 #[cfg(feature = "standalone")]
 impl Standalone
     for CompoundConsensusComponent<
         StandaloneCtx,
+        AscendingCount,
         AscendingCount,
         PBFTProto<AscendingCount, String>,
         PBFTMsgPERCodec,
@@ -780,11 +645,9 @@ impl Standalone
 {
     type Config = StandaloneConfig;
     type CreateCleanup = StandaloneCreateCleanup;
-    type RunCleanup = ConsensusComponentCleanup;
-    type RunErrorCleanup = ();
 
-    const COMPONENT_NAME: &str = "consensus";
     const CONFIG_FILES: &[&str] = &["consensus.conf"];
+    const NAME: &str = "consensus";
     const VERSION: FullVersion = FullVersion::new(
         None,
         Version::new(0, 0, 0),
@@ -877,7 +740,7 @@ impl Standalone
                     registry: Arc::new(registry),
                     caches: caches
                 };
-                let round_ids = AscendingCount { curr: 0 };
+                let round_ids = AscendingCount::default();
                 let standalone = ConsensusComponent {
                     channel: PhantomData,
                     resolver: PhantomData,
@@ -902,6 +765,20 @@ impl Standalone
             }
         }
     }
+}
+
+impl StandaloneService
+    for CompoundConsensusComponent<
+        StandaloneCtx,
+        AscendingCount,
+        AscendingCount,
+        PBFTProto<AscendingCount, String>,
+        PBFTMsgPERCodec,
+        StringPrincipalCodec
+    >
+{
+    type RunCleanup = ConsensusComponentCleanup;
+    type RunErrorCleanup = ();
 
     fn run(self) -> Result<Self::RunCleanup, Self::RunErrorCleanup> {
         match self.start() {
@@ -974,16 +851,6 @@ impl ScopedError for StringPrincipalDecodeError {
     }
 }
 
-impl Display for PartyStreamIdx {
-    #[inline]
-    fn fmt(
-        &self,
-        f: &mut Formatter<'_>
-    ) -> Result<(), Error> {
-        write!(f, "{}", self.0)
-    }
-}
-
 impl DatagramCodec<String> for StringPrincipalCodec {
     type CreateError = Infallible;
     type DecodeError = StringPrincipalDecodeError;
@@ -1039,19 +906,7 @@ impl Display for ConsensusComponentRunError {
     }
 }
 
-// ISSUE #2, ISSUE #6: Delete from here
-
-impl Iterator for AscendingCount {
-    type Item = u128;
-
-    fn next(&mut self) -> Option<u128> {
-        let out = self.curr;
-
-        self.curr += 1;
-
-        Some(out)
-    }
-}
+// ISSUE #2: Delete from here
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum TestCred {
@@ -1117,4 +972,4 @@ impl Display for TestCred {
     }
 }
 
-// ISSUE #2, ISSUE #6: to here
+// ISSUE #2: to here
