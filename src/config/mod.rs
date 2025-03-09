@@ -29,7 +29,7 @@ use constellation_common::codec::DatagramCodec;
 #[cfg(feature = "standalone")]
 use constellation_common::ids::AscendingCount;
 use constellation_common::ids::IDGen;
-use constellation_component_common::config::MulticastConfig;
+use constellation_component_common::config::MulticastCommConfig;
 #[cfg(feature = "standalone")]
 use constellation_pbft::config::PBFTConfig;
 #[cfg(feature = "standalone")]
@@ -62,7 +62,7 @@ pub struct ConsensusConfig<
     #[serde(default)]
     party_codec: PartyCodec,
     #[serde(flatten)]
-    multicast: MulticastConfig<PartyID, Channels, Epochs, Endpoint>
+    multicast: MulticastCommConfig<PartyID, Channels, Epochs, Endpoint>
 }
 
 impl<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>
@@ -76,7 +76,7 @@ where
     #[inline]
     pub fn multicast(
         &self
-    ) -> &MulticastConfig<PartyID, Channels, Epochs, Endpoint> {
+    ) -> &MulticastCommConfig<PartyID, Channels, Epochs, Endpoint> {
         &self.multicast
     }
 
@@ -102,7 +102,7 @@ where
         Proto,
         PartyID,
         PartyCodec,
-        MulticastConfig<PartyID, Channels, Epochs, Endpoint>
+        MulticastCommConfig<PartyID, Channels, Epochs, Endpoint>
     ) {
         (
             self.proto,
