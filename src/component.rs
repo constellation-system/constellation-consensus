@@ -514,10 +514,6 @@ where
 
                 party_data
             }
-            // This is here as a placeholder; this type is
-            // uninhabited, and Rust > 1.81 clippy generates an error
-            // for this.
-            Err(_) => panic!("Impossible case!")
         };
 
         if let Err(err) =
@@ -535,11 +531,7 @@ where
         }
 
         let party_iter = match multicast.parties() {
-            Ok(party_iter) => party_iter,
-            // This is here as a placeholder; this type is
-            // uninhabited, and Rust > 1.81 clippy generates an error
-            // for this.
-            Err(_) => panic!("Impossible case!")
+            Ok(party_iter) => party_iter
         };
 
         if let Err(err) = authn_msg_recv.set_parties(party_iter) {
