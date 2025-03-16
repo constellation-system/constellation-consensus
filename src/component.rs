@@ -530,10 +530,7 @@ where
             return Err(ConsensusComponentRunError);
         }
 
-        let party_iter = match multicast.parties() {
-            Ok(party_iter) => party_iter
-        };
-
+        let Ok(party_iter) = multicast.parties();
         if let Err(err) = authn_msg_recv.set_parties(party_iter) {
             error!("error setting parties: {}", err);
         }
