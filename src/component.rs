@@ -76,8 +76,8 @@ use constellation_common::sync::Notify;
 use constellation_common::version::FullVersion;
 use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
-use constellation_component_common::comm::multicast::MulticastComm;
-use constellation_component_common::comm::multicast::MulticastCommCleanup;
+use constellation_component_common::bus::multicast::MulticastDatagramBus;
+use constellation_component_common::bus::multicast::MulticastDatagramBusCleanup;
 use constellation_component_common::config::PartiesConfig;
 use constellation_component_common::PartyStreamIdx;
 use constellation_consensus_common::parties::StaticParties;
@@ -265,7 +265,7 @@ pub struct ConsensusComponent<
 
 pub struct ConsensusComponentCleanup {
     shutdown: ShutdownFlag,
-    multicast: MulticastCommCleanup,
+    multicast: MulticastDatagramBusCleanup,
     state_join: JoinHandle<()>
 }
 
@@ -459,7 +459,7 @@ where
             rounds.clone(),
             notify.clone()
         );
-        let multicast: MulticastComm<
+        let multicast: MulticastDatagramBus<
             _,
             MsgCodec,
             _,
@@ -472,7 +472,7 @@ where
             Resolver,
             _,
             _
-        > = match MulticastComm::create(
+        > = match MulticastDatagramBus::create(
             self_party.clone(),
             multicast_config,
             listener,
