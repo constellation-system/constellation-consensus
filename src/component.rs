@@ -31,7 +31,6 @@ use std::thread::JoinHandle;
 
 #[cfg(feature = "standalone")]
 use clap::ArgMatches;
-use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TestAuthN;
 use constellation_auth::cred::SSLCred;
@@ -903,14 +902,11 @@ pub enum TestCred {
     Unix { addr: UnixSocketAddr }
 }
 
-impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>>
-    for TestCred
+impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>> for TestCred
 where
     TestCred: From<Basic>
 {
-    fn from(
-        _val: SSLCred<CompoundFarChannelSessionCred<Basic>>
-    ) -> TestCred {
+    fn from(_val: SSLCred<CompoundFarChannelSessionCred<Basic>>) -> TestCred {
         panic!("Not supported!")
     }
 }
