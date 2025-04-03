@@ -144,7 +144,7 @@ pub struct StandaloneConfig {
         ChannelRegistryChannelsConfig<
             <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
         >,
-        <AscendingCount as IDGen>::Config,
+        <AscendingCount<u128> as IDGen>::Config,
         CompoundFarEndpoint
     >
 }
@@ -161,7 +161,7 @@ impl StandaloneConfig {
         ChannelRegistryChannelsConfig<
             <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
         >,
-        <AscendingCount as IDGen>::Config,
+        <AscendingCount<u128> as IDGen>::Config,
         CompoundFarEndpoint
     > {
         &self.consensus
@@ -181,7 +181,7 @@ impl StandaloneConfig {
             ChannelRegistryChannelsConfig<
                 <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
             >,
-            <AscendingCount as IDGen>::Config,
+            <AscendingCount<u128> as IDGen>::Config,
             CompoundFarEndpoint
         >
     ) {

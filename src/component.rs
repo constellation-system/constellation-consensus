@@ -626,9 +626,9 @@ impl
 impl Standalone
     for CompoundConsensusComponent<
         StandaloneCtx,
-        AscendingCount,
-        AscendingCount,
-        PBFTProto<AscendingCount, String>,
+        AscendingCount<u128>,
+        AscendingCount<u128>,
+        PBFTProto<AscendingCount<u128>, String>,
         PBFTMsgPERCodec,
         StringPrincipalCodec
     >
@@ -760,9 +760,9 @@ impl Standalone
 impl StandaloneService
     for CompoundConsensusComponent<
         StandaloneCtx,
-        AscendingCount,
-        AscendingCount,
-        PBFTProto<AscendingCount, String>,
+        AscendingCount<u128>,
+        AscendingCount<u128>,
+        PBFTProto<AscendingCount<u128>, String>,
         PBFTMsgPERCodec,
         StringPrincipalCodec
     >
