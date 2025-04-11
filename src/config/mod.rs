@@ -29,7 +29,7 @@ use constellation_common::codec::Codec;
 #[cfg(feature = "standalone")]
 use constellation_common::ids::AscendingCount;
 use constellation_common::ids::IDGen;
-use constellation_component_common::config::MulticastCommConfig;
+use constellation_component_common::config::MulticastDatagramBusConfig;
 #[cfg(feature = "standalone")]
 use constellation_pbft::config::PBFTConfig;
 #[cfg(feature = "standalone")]
@@ -62,7 +62,7 @@ pub struct ConsensusConfig<
     #[serde(default)]
     party_codec: PartyCodec,
     #[serde(flatten)]
-    multicast: MulticastCommConfig<PartyID, Channels, Epochs, Endpoint>
+    multicast: MulticastDatagramBusConfig<PartyID, Channels, Epochs, Endpoint>
 }
 
 impl<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>
@@ -76,7 +76,7 @@ where
     #[inline]
     pub fn multicast(
         &self
-    ) -> &MulticastCommConfig<PartyID, Channels, Epochs, Endpoint> {
+    ) -> &MulticastDatagramBusConfig<PartyID, Channels, Epochs, Endpoint> {
         &self.multicast
     }
 
@@ -102,7 +102,7 @@ where
         Proto,
         PartyID,
         PartyCodec,
-        MulticastCommConfig<PartyID, Channels, Epochs, Endpoint>
+        MulticastDatagramBusConfig<PartyID, Channels, Epochs, Endpoint>
     ) {
         (
             self.proto,
@@ -144,7 +144,7 @@ pub struct StandaloneConfig {
         ChannelRegistryChannelsConfig<
             <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
         >,
-        <AscendingCount as IDGen>::Config,
+        <AscendingCount<u128> as IDGen>::Config,
         CompoundFarEndpoint
     >
 }
@@ -161,7 +161,7 @@ impl StandaloneConfig {
         ChannelRegistryChannelsConfig<
             <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
         >,
-        <AscendingCount as IDGen>::Config,
+        <AscendingCount<u128> as IDGen>::Config,
         CompoundFarEndpoint
     > {
         &self.consensus
@@ -181,7 +181,7 @@ impl StandaloneConfig {
             ChannelRegistryChannelsConfig<
                 <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
             >,
-            <AscendingCount as IDGen>::Config,
+            <AscendingCount<u128> as IDGen>::Config,
             CompoundFarEndpoint
         >
     ) {
