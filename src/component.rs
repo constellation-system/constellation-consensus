@@ -473,7 +473,7 @@ where
             _,
             _
         > = match MulticastDatagramBus::create(
-            self_party.clone(),
+            Some(self_party.clone()),
             multicast_config,
             listener,
             ctx,
@@ -541,13 +541,19 @@ where
         debug!(target: "consensus-component",
                "starting multicaster");
 
-        let multicast_cleanup = multicast.start();
+        match multicast.start() {
+            Ok(multicast_cleanup) =>
+                Ok(ConsensusComponentCleanup {
+                    shutdown: shutdown,
+                    multicast: multicast_cleanup,
+                    state_join: state_join
+                }),
+            Err(err) => {
+                error!("error starting multicast bus: {}", err);
 
-        Ok(ConsensusComponentCleanup {
-            shutdown: shutdown,
-            multicast: multicast_cleanup,
-            state_join: state_join
-        })
+                Err(ConsensusComponentRunError)
+            }
+        }
     }
 }
 
@@ -850,6 +856,14 @@ impl Codec<String> for StringPrincipalCodec {
     #[inline]
     fn create(_param: Self::Param) -> Result<Self, Self::CreateError> {
         Ok(StringPrincipalCodec)
+    }
+
+    #[inline]
+    fn buf_size(
+        &self,
+        val: &String
+    ) -> usize {
+        val.as_bytes().len()
     }
 
     fn decode(
