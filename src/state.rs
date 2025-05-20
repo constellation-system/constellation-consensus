@@ -16,37 +16,225 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Display;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::SendError;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
 use std::thread::spawn;
 use std::thread::JoinHandle;
 
+use constellation_common::error::MutexPoison;
+use constellation_common::hashid::HashID;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
+use constellation_component_common::consensus_ctl::ConsensusCtlRound;
 use constellation_consensus_common::round::RoundsAdvance;
 use constellation_consensus_common::round::RoundsUpdate;
 use constellation_consensus_common::state::RoundResultReporter;
 use log::debug;
 use log::error;
 use log::info;
+use log::trace;
 
-pub(crate) struct StateThread<R, RoundID, Oper>
+const MAX_BATCH_SIZE: usize = 16;
+
+struct Inbound<H>
 where
-    R: RoundsAdvance<RoundID> + RoundsUpdate<Oper> + Send,
-    RoundID: Clone + Display + Ord + Send,
-    Oper: Send {
-    rounds: PhantomData<R>,
-    recv: Receiver<(RoundID, Oper)>,
-    shutdown: ShutdownFlag,
+    H: Clone + Display + Hash + HashID + Eq + Send {
+    /// Hashes that are actually still live.
+    hashes: HashSet<H>,
+    /// Queue of hashes, which may contain some that are dead.
+    reqs: VecDeque<H>
+}
+
+pub(crate) struct State<RoundID, H, Seal>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    Seal: Send {
+    inbound: RwLock<Inbound<H>>,
+    // XXX this may be better off as an mpsc.
+    outbound: Mutex<VecDeque<ConsensusCtlRound<RoundID, H, Seal>>>,
     notify: Notify
+}
+
+pub(crate) struct StateThread<R, RoundID, H, Seal, Oper>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    RoundID: Clone + Display + Ord + Send,
+    Oper: Send,
+    Seal: Send {
+    rounds: PhantomData<R>,
+    state: Arc<State<RoundID, H, Seal>>,
+    recv: Receiver<(RoundID, Oper)>,
+    shutdown: ShutdownFlag
 }
 
 pub(crate) struct StateThreadReporter<RoundID, Oper> {
     send: Sender<(RoundID, Oper)>
+}
+
+impl<RoundID, H, Seal> State<RoundID, H, Seal>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    Seal: Send
+{
+    #[inline]
+    pub(crate) fn new() -> Self {
+        let inbound = Inbound {
+            hashes: HashSet::new(),
+            reqs: VecDeque::new()
+        };
+        let outbound = VecDeque::new();
+
+        // XXX use size hints.
+        State {
+            inbound: RwLock::new(inbound),
+            outbound: Mutex::new(outbound),
+            notify: Notify::new()
+        }
+    }
+
+    #[inline]
+    pub(crate) fn notify(&self) -> Notify {
+        self.notify.clone()
+    }
+
+    pub(crate) fn get_batch(
+        &self,
+        buf: &mut [H; MAX_BATCH_SIZE]
+    ) -> Result<usize, MutexPoison> {
+        let mut count = 0;
+        let inbound = self.inbound.read().map_err(|_| MutexPoison)?;
+
+        debug!(target: "consensus-component-state",
+               "getting hashes for new round");
+
+        // Filter the queue by what's actually in the live hash set.
+        for hash in inbound
+            .reqs
+            .iter()
+            .filter(|ent| inbound.hashes.contains(ent))
+            .take(MAX_BATCH_SIZE)
+        {
+            trace!(target: "consensus-component-state",
+                   "adding hash {} to batch",
+                   hash);
+
+            buf[count] = hash.clone();
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
+    pub(crate) fn get_round_msg(
+        &self
+    ) -> Result<Option<ConsensusCtlRound<RoundID, H, Seal>>, MutexPoison> {
+        self.outbound
+            .lock()
+            .map(|mut queue| queue.pop_back())
+            .map_err(|_| MutexPoison)
+    }
+
+    fn clear_hashes(
+        &self,
+        hashes: &[H]
+    ) -> Result<(), MutexPoison> {
+        let mut inbound = self.inbound.write().map_err(|_| MutexPoison)?;
+
+        trace!(target: "consensus-component-state",
+               "clearing committed hashes from state");
+
+        // Remove the hashes from the live set.
+        for hash in hashes.iter() {
+            trace!(target: "consensus-component-state",
+                   "clearing hash {}",
+                   hash);
+
+            let _ = inbound.hashes.remove(&hash);
+        }
+
+        // Clear out the front of the queue.
+        while inbound
+            .reqs
+            .front()
+            .map_or(false, |hash| !inbound.hashes.contains(hash))
+        {
+            if let Some(hash) = inbound.reqs.pop_front() {
+                trace!(target: "consensus-component-state",
+                       "popped hash {} from queue",
+                       hash);
+            } else {
+                error!(target: "consensus-component-state",
+                       "queue should not have been empty");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn add_hashes(
+        &self,
+        hashes: Vec<H>
+    ) -> Result<(), MutexPoison> {
+        let mut inbound = self.inbound.write().map_err(|_| MutexPoison)?;
+        let mut changed = false;
+
+        debug!(target: "consensus-component-state",
+               "attempting to add {} hashes",
+               hashes.len());
+
+        for hash in hashes.into_iter() {
+            if inbound.hashes.insert(hash.clone()) {
+                trace!(target: "consensus-component-state",
+                       "adding new hash {}",
+                       hash);
+
+                inbound.reqs.push_back(hash);
+                changed = true;
+            } else {
+                trace!(target: "consensus-component-state",
+                       "hash {} already known",
+                       hash);
+            }
+        }
+
+        if changed {
+            self.notify.notify()?
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn add_round(
+        &self,
+        round: RoundID,
+        hashes: Vec<H>
+    ) -> Result<(), MutexPoison> {
+        debug!(target: "consensus-component-state",
+               "adding round {} to outbound queue",
+               round);
+
+        self.clear_hashes(&hashes)?;
+        self.outbound
+            .lock()
+            .map_err(|_| MutexPoison)?
+            .push_back(ConsensusCtlRound::new(round, hashes, None));
+        self.notify.notify()?;
+
+        Ok(())
+    }
 }
 
 impl<RoundID, Oper> Clone for StateThreadReporter<RoundID, Oper> {
@@ -58,14 +246,16 @@ impl<RoundID, Oper> Clone for StateThreadReporter<RoundID, Oper> {
     }
 }
 
-impl<R, RoundID, Oper> StateThread<R, RoundID, Oper>
+impl<R, RoundID, H, Seal, Oper> StateThread<R, RoundID, H, Seal, Oper>
 where
     R: 'static + RoundsAdvance<RoundID> + RoundsUpdate<Oper> + Send,
-    RoundID: 'static + Clone + Display + Ord + Send,
-    Oper: 'static + Send
+    RoundID: 'static + Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: 'static + Clone + Display + Hash + HashID + Eq + Send + Sync,
+    Oper: 'static + Send,
+    Seal: 'static + Send
 {
     pub(crate) fn create(
-        notify: Notify,
+        state: Arc<State<RoundID, H, Seal>>,
         shutdown: ShutdownFlag
     ) -> (Self, StateThreadReporter<RoundID, Oper>) {
         let (send, recv) = channel();
@@ -73,8 +263,8 @@ where
         (
             StateThread {
                 rounds: PhantomData,
-                notify: notify,
                 shutdown: shutdown,
+                state: state,
                 recv: recv
             },
             StateThreadReporter { send: send }
@@ -110,7 +300,7 @@ where
                                 valid = false;
                             }
 
-                            if let Err(err) = self.notify.notify() {
+                            if let Err(err) = self.state.notify().notify() {
                                 error!(target: "consensus-component-state-thread",
                                        "error notifying sender: {}",
                                        err);

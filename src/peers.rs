@@ -1,0 +1,456 @@
+// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+//
+// This program is free software: you can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License,
+// version 3, as published by the Free Software Foundation.  If you
+// would like to purchase a commercial license for this software, please
+// contact APL’s Tech Transfer at 240-592-0817 or
+// techtransfer@jhuapl.edu.
+//
+// This program is distributed in the hope that it will be useful, but
+// WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public
+// License along with this program.  If not, see
+// <https://www.gnu.org/licenses/>.
+
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::fmt::Error;
+use std::fmt::Formatter;
+use std::hash::Hash;
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
+
+use constellation_auth::authn::AuthNMsgRecv;
+use constellation_auth::authn::PassthruMsgAuthN;
+use constellation_common::codec::Codec;
+use constellation_common::error::ErrorScope;
+use constellation_common::error::MutexPoison;
+use constellation_common::error::ScopedError;
+use constellation_common::error::WithMutexPoison;
+use constellation_common::hashid::HashAlgo;
+use constellation_common::hashid::HashID;
+use constellation_common::ids::IDGen;
+use constellation_common::shutdown::ShutdownFlag;
+use constellation_common::sync::Notify;
+use constellation_component_common::bus::large_obj::dispatch::SessionDispatch;
+use constellation_component_common::consensus_ctl::ConsensusCtl;
+use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
+use constellation_streams::config::LargeObjProtoConfig;
+use constellation_streams::frags::Frags;
+use constellation_streams::frags::OutboundFrags;
+use constellation_streams::large_obj::LargeObjID;
+use constellation_streams::large_obj::LargeObjMsgs;
+use constellation_streams::large_obj::LargeObjProto;
+use constellation_streams::large_obj::LargeObjProtoAddOutboundError;
+use constellation_streams::large_obj::LargeObjProtoCreateError;
+use constellation_streams::large_obj::LargeObjSender;
+use log::debug;
+use log::trace;
+use log::warn;
+
+use crate::state::State;
+
+pub(crate) struct PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    SealCodec: Clone + Codec<Seal>,
+    SealCodec::Param: Clone + Default,
+    Seal: Clone + Send,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs::Config: Clone,
+    Prin: Clone + Display + Eq + Hash + Send + Sync {
+    hash: PhantomData<H>,
+    ids: PhantomData<IDs>,
+    sessions: Arc<Mutex<HashMap<Prin, PeerSession>>>,
+    state: Arc<State<RoundID, H::HashID, Seal>>,
+    config: LargeObjProtoConfig<
+        <ConsensusCtlCodec<RoundID, H, Seal, SealCodec> as Codec<
+            ConsensusCtl<RoundID, H::HashID, Seal>
+        >>::Param,
+        IDs::Config
+    >
+}
+
+#[derive(Clone)]
+pub(crate) struct PeerSessionRecv<RoundID, H, Prin, Seal>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Seal: Clone + Send {
+    hash: PhantomData<H>,
+    state: Arc<State<RoundID, H, Seal>>,
+    sessions: Arc<Mutex<HashMap<Prin, PeerSession>>>
+}
+
+#[derive(Clone)]
+pub(crate) struct PeerSessionMsgs<RoundID, H, Prin, Seal>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Eq + Hash + HashID + Send + Sync,
+    Seal: Clone + Send {
+    state: Arc<State<RoundID, H::HashID, Seal>>,
+    prin: Prin
+}
+
+struct PeerSession {
+    local_shutdown: ShutdownFlag
+}
+
+#[derive(Debug)]
+pub(crate) enum PeerSessionDispatchError<Prin, Codec> {
+    Proto {
+        err: LargeObjProtoCreateError<Codec>
+    },
+    Exists {
+        prin: Prin
+    },
+    Unknown {
+        prin: Prin
+    },
+    MutexPoison
+}
+
+#[derive(Debug)]
+pub(crate) enum PeerSessionRecvError<Prin> {
+    NotFound { prin: Prin },
+    MutexPoison
+}
+
+unsafe impl<RoundID, H, IDs, Prin, Seal, SealCodec> Send
+    for PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    SealCodec: Clone + Codec<Seal>,
+    SealCodec::Param: Clone + Default,
+    Seal: Clone + Send,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs::Config: Clone,
+    Prin: Clone + Display + Eq + Hash + Send + Sync
+{
+}
+
+unsafe impl<RoundID, H, IDs, Prin, Seal, SealCodec> Sync
+    for PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    SealCodec: Clone + Codec<Seal>,
+    SealCodec::Param: Clone + Default,
+    Seal: Clone + Send,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs::Config: Clone,
+    Prin: Clone + Display + Eq + Hash + Send + Sync
+{
+}
+
+unsafe impl<RoundID, H, Prin, Seal> Send
+    for PeerSessionRecv<RoundID, H, Prin, Seal>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Seal: Clone + Send
+{
+}
+
+unsafe impl<RoundID, H, Prin, Seal> Sync
+    for PeerSessionRecv<RoundID, H, Prin, Seal>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Seal: Clone + Send
+{
+}
+
+impl<RoundID, H, Prin, Seal>
+    LargeObjMsgs<H, ConsensusCtl<RoundID, H::HashID, Seal>>
+    for PeerSessionMsgs<RoundID, H, Prin, Seal>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    H: Clone + HashAlgo,
+    H::HashID: Clone + Display + Eq + Hash + HashID + Send + Sync,
+    Seal: Clone + Send
+{
+    type AddMsgsError<Encode>
+        = WithMutexPoison<LargeObjProtoAddOutboundError<H::HashID, Encode>>
+    where
+        Encode: Display + ScopedError;
+
+    fn add_msgs<WrapperCodec, F>(
+        &mut self,
+        sender: &mut LargeObjSender<
+            H,
+            ConsensusCtl<RoundID, H::HashID, Seal>,
+            WrapperCodec,
+            F
+        >
+    ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
+    where
+        WrapperCodec: Clone + Codec<ConsensusCtl<RoundID, H::HashID, Seal>>,
+        WrapperCodec::Param: Default,
+        F: Frags {
+        // XXX do retry
+
+        if let Some(msg) = self.state.get_round_msg()? {
+            let msg = ConsensusCtl::Round(msg);
+
+            sender
+                .add_outbound(&msg)
+                .map_err(|err| WithMutexPoison::Inner { error: err })?;
+
+            // XXX the protocol should probably be refactored to send
+            // batches.
+            Ok(Some(Instant::now()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl<Prin> ScopedError for PeerSessionRecvError<Prin> {
+    fn scope(&self) -> ErrorScope {
+        match self {
+            PeerSessionRecvError::NotFound { .. } => ErrorScope::Session,
+            PeerSessionRecvError::MutexPoison => ErrorScope::Unrecoverable
+        }
+    }
+}
+
+impl Drop for PeerSession {
+    fn drop(&mut self) {
+        trace!(target: "peer-session",
+               "signaling local shutdown");
+
+        self.local_shutdown.set()
+    }
+}
+
+impl<RoundID, Prin, H, Seal> AuthNMsgRecv<Prin, ConsensusCtl<RoundID, H, Seal>>
+    for PeerSessionRecv<RoundID, H, Prin, Seal>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Seal: Clone + Send
+{
+    /// Errors that can occur reporting messages.
+    type RecvError = MutexPoison;
+
+    /// Receive an authenticated message.
+    fn recv_auth_msg(
+        &mut self,
+        prin: &Prin,
+        msg: ConsensusCtl<RoundID, H, Seal>
+    ) -> Result<(), Self::RecvError> {
+        debug!(target: "peer-session-recv",
+               "received message from peer {}",
+               prin);
+
+        match msg {
+            ConsensusCtl::Round(_) => {
+                warn!(target: "peer-session-recv",
+                      "ignoring unexpected round message");
+
+                Ok(())
+            }
+            ConsensusCtl::Submit(submit) => {
+                let hashes = submit.take();
+
+                self.state.add_hashes(hashes)
+            }
+        }
+    }
+}
+
+impl<RoundID, H, IDs, Prin, Seal, SealCodec>
+    PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    SealCodec: Clone + Codec<Seal>,
+    SealCodec::Param: Clone + Default,
+    Seal: Clone + Send,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs::Config: Clone,
+    Prin: Clone + Display + Eq + Hash + Send + Sync
+{
+    pub(crate) fn new(
+        config: LargeObjProtoConfig<
+            <ConsensusCtlCodec<RoundID, H, Seal, SealCodec> as Codec<
+                ConsensusCtl<RoundID, H::HashID, Seal>
+            >>::Param,
+            IDs::Config
+        >,
+        state: Arc<State<RoundID, H::HashID, Seal>>
+    ) -> Self {
+        let sessions = Arc::new(Mutex::new(HashMap::new()));
+
+        PeerSessionDispatch {
+            hash: PhantomData,
+            ids: PhantomData,
+            sessions: sessions,
+            config: config,
+            state: state
+        }
+    }
+}
+
+impl<RoundID, H, IDs, Prin, Seal, SealCodec>
+    SessionDispatch<
+        H,
+        ConsensusCtl<RoundID, H::HashID, Seal>,
+        ConsensusCtl<RoundID, H::HashID, Seal>,
+        PassthruMsgAuthN<ConsensusCtl<RoundID, H::HashID, Seal>, Prin>,
+        ConsensusCtlCodec<RoundID, H, Seal, SealCodec>,
+        IDs,
+        PeerSessionMsgs<RoundID, H, Prin, Seal>,
+        PeerSessionRecv<RoundID, H::HashID, Prin, Seal>,
+        Prin
+    > for PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+where
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs::Config: Clone,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Seal: Clone + Send,
+    SealCodec: Clone + Codec<Seal>,
+    SealCodec::Param: Clone + Default
+{
+    type SessionError = PeerSessionDispatchError<
+        Prin,
+        <ConsensusCtlCodec<RoundID, H, Seal, SealCodec> as Codec<
+            ConsensusCtl<RoundID, H::HashID, Seal>
+        >>::CreateError
+    >;
+
+    fn session(
+        &self,
+        prin: Prin
+    ) -> Result<
+        (
+            ShutdownFlag,
+            Notify,
+            LargeObjProto<
+                H,
+                ConsensusCtl<RoundID, H::HashID, Seal>,
+                ConsensusCtl<RoundID, H::HashID, Seal>,
+                PassthruMsgAuthN<ConsensusCtl<RoundID, H::HashID, Seal>, Prin>,
+                (),
+                ConsensusCtlCodec<RoundID, H, Seal, SealCodec>,
+                IDs,
+                PeerSessionMsgs<RoundID, H, Prin, Seal>,
+                PeerSessionRecv<RoundID, H::HashID, Prin, Seal>,
+                OutboundFrags
+            >
+        ),
+        Self::SessionError
+    > {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| PeerSessionDispatchError::MutexPoison)?;
+        let local_shutdown = match sessions.entry(prin.clone()) {
+            Entry::Vacant(ent) => {
+                let local_shutdown = ShutdownFlag::new();
+
+                debug!(target: "peer-session-dispatch",
+                       "creating session for {}",
+                       prin);
+
+                ent.insert(PeerSession {
+                    local_shutdown: local_shutdown.clone()
+                });
+
+                Ok(local_shutdown)
+            }
+            _ => Err(PeerSessionDispatchError::Exists { prin: prin.clone() })
+        }?;
+        let hash = H::default();
+        let recv = PeerSessionRecv {
+            hash: PhantomData,
+            sessions: self.sessions.clone(),
+            state: self.state.clone()
+        };
+        let msgs = PeerSessionMsgs {
+            state: self.state.clone(),
+            prin: prin
+        };
+        let authn = PassthruMsgAuthN::default();
+        let proto = LargeObjProto::create(
+            self.config.clone(),
+            self.state.notify(),
+            recv,
+            msgs,
+            authn,
+            hash
+        )
+        .map_err(|err| PeerSessionDispatchError::Proto { err: err })?;
+
+        Ok((local_shutdown, self.state.notify(), proto))
+    }
+}
+
+impl<Prin, Codec> Display for PeerSessionDispatchError<Prin, Codec>
+where
+    Prin: Display,
+    Codec: Display
+{
+    #[inline]
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            PeerSessionDispatchError::Proto { err } => err.fmt(f),
+            PeerSessionDispatchError::Unknown { prin } => {
+                write!(f, "no processor associated with {}", prin)
+            }
+            PeerSessionDispatchError::Exists { prin } => {
+                write!(f, "processor session already exists for {}", prin)
+            }
+            PeerSessionDispatchError::MutexPoison => {
+                write!(f, "mutex poisoned")
+            }
+        }
+    }
+}
+
+impl<Prin> Display for PeerSessionRecvError<Prin>
+where
+    Prin: Display
+{
+    #[inline]
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            PeerSessionRecvError::NotFound { prin } => {
+                write!(f, "no processor session exists for {}", prin)
+            }
+            PeerSessionRecvError::MutexPoison => {
+                write!(f, "mutex poisoned")
+            }
+        }
+    }
+}
