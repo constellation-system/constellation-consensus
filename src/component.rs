@@ -782,7 +782,6 @@ impl Standalone
         // authenticator.
         let multicast_config = consensus_config.multicast();
         let parties_config = multicast_config.parties();
-
         let authn_parties = match parties_config {
             PartiesConfig::Static { stat } => {
                 let mut authn_parties = Vec::with_capacity(stat.len());
@@ -835,9 +834,9 @@ impl Standalone
                 authn_parties
             }
         };
-
         let consensus_authn =
             Arc::new(TestAuthN::from_parties(authn_parties.into_iter()));
+
         let consensus_registry = match StandaloneRegistry::create(
             &mut caches,
             consensus_authn,

@@ -23,6 +23,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::mpsc::SendError;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 use std::thread::spawn;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use constellation_common::error::MutexPoison;
 use constellation_common::hashid::HashID;
@@ -271,58 +273,152 @@ where
         )
     }
 
-    fn run(
-        self,
-        mut rounds: R
-    ) {
-        let mut valid = true;
+    fn process_one(
+        &mut self,
+        rounds: &mut R,
+        oper: Oper
+    ) -> (bool, Option<Instant>) {
+        match rounds.update(oper) {
+            Ok(()) => match rounds.advance() {
+                Ok(Some((_, deadline))) => {
+                    if let Err(err) = self.state.notify().notify() {
+                        error!(target: "consensus-component-state-thread",
+                               "error notifying sender: {}",
+                               err);
+                    }
 
-        info!(target: "consensus-component-state-thread",
-               "state thread starting");
+                    (true, deadline)
+                }
+                // XXX this will go away
+                Ok(None) => {
+                    if let Err(err) = self.state.notify().notify() {
+                        error!(target: "consensus-component-state-thread",
+                               "error notifying sender: {}",
+                               err);
+                    }
 
-        while self.shutdown.is_live() && valid {
-            info!(target: "consensus-component-state-thread",
-                  "waiting for notification");
+                    (true, None)
+                }
+                Err(err) => {
+                    error!(target: "consensus-component-state-thread",
+                           "error advancing to next round: {}",
+                           err);
 
-            match self.recv.recv() {
-                Ok((round, oper)) => {
-                    debug!(target: "consensus-component-state-thread",
-                           "notified of round: {}",
-                           round);
+                    (false, None)
+                }
+            },
+            Err(err) => {
+                debug!(target: "consensus-component-state-thread",
+                       "error applying state update: {}",
+                       err);
 
-                    match rounds.update(oper) {
-                        Ok(()) => {
-                            if let Err(err) = rounds.advance() {
-                                error!(target: "consensus-component-state-thread",
-                                       "error advancing to next round: {}",
-                                       err);
+                (false, None)
+            }
+        }
+    }
 
-                                valid = false;
-                            }
+    fn recv_one(
+        &mut self,
+        rounds: &mut R,
+        deadline: Option<Instant>
+    ) -> (bool, Option<Instant>) {
+        if let Some(when) = &deadline {
+            let now = Instant::now();
 
-                            if let Err(err) = self.state.notify().notify() {
-                                error!(target: "consensus-component-state-thread",
+            if now < *when {
+                let duration = *when - now;
+
+                trace!(target: "consensus-component-state-thread",
+                       "waiting for round result for {}.{:.03}s",
+                       duration.as_secs(),
+                       duration.subsec_millis());
+
+                match self.recv.recv_timeout(duration) {
+                    Ok((_, oper)) => self.process_one(rounds, oper),
+                    Err(RecvTimeoutError::Timeout) => {
+                        match rounds.time_update() {
+                            Ok(deadline) => {
+                                if let Err(err) = self.state.notify().notify() {
+                                    error!(target: "consensus-component-state-thread",
                                        "error notifying sender: {}",
                                        err);
+
+                                    (false, None)
+                                } else {
+                                    (true, deadline)
+                                }
+                            }
+                            Err(err) => {
+                                error!(target: "consensus-component-state-thread",
+                                       "error in time update: {}",
+                                       err);
+
+                                (false, None)
                             }
                         }
-                        Err(err) => {
-                            debug!(target: "consensus-component-state-thread",
-                                   "error applying state update: {}",
-                                   err);
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        debug!(target: "consensus-component-state-thread",
+                               "mpsc channel disconnected");
 
-                            valid = false;
-                        }
+                        (false, None)
                     }
                 }
+            } else {
+                trace!(target: "consensus-component-state-thread",
+                       "time update deadline expired");
+
+                // Deadline already expired.
+                match rounds.time_update() {
+                    Ok(deadline) => {
+                        if let Err(err) = self.state.notify().notify() {
+                            error!(target: "consensus-component-state-thread",
+                               "error notifying sender: {}",
+                               err);
+
+                            (false, None)
+                        } else {
+                            (true, deadline)
+                        }
+                    }
+                    Err(err) => {
+                        error!(target: "consensus-component-state-thread",
+                               "error in time update: {}",
+                        err);
+
+                        (false, None)
+                    }
+                }
+            }
+        } else {
+            trace!(target: "consensus-component-state-thread",
+                   "waiting for round result");
+
+            match self.recv.recv() {
+                Ok((_, oper)) => self.process_one(rounds, oper),
                 Err(err) => {
                     debug!(target: "consensus-component-state-thread",
                            "saw shutdown condition: {}",
                            err);
 
-                    valid = false;
+                    (false, None)
                 }
             }
+        }
+    }
+
+    fn run(
+        mut self,
+        mut rounds: R
+    ) {
+        let mut valid = true;
+        let mut deadline = None;
+
+        info!(target: "consensus-component-state-thread",
+               "state thread starting");
+
+        while self.shutdown.is_live() && valid {
+            (valid, deadline) = self.recv_one(&mut rounds, deadline);
         }
 
         info!(target: "consensus-component-state-thread",
