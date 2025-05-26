@@ -87,12 +87,12 @@ use constellation_component_common::config::PartiesConfig;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
 use constellation_component_common::PartyStreamIdx;
+use constellation_consensus_common::oper::OperBatch;
 use constellation_consensus_common::parties::StaticParties;
 use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoRounds;
 use constellation_consensus_common::proto::SharedConsensusProto;
-use constellation_consensus_common::round::RoundsAdvance;
-use constellation_consensus_common::round::RoundsSetParties;
+use constellation_consensus_common::round::RoundsSubmit;
 use constellation_consensus_common::state::ProtoState;
 #[cfg(feature = "standalone")]
 use constellation_pbft::msgs::PBFTMsgPERCodec;
@@ -121,6 +121,7 @@ use crate::config::StandaloneConfig;
 use crate::peers::PeerSessionDispatch;
 use crate::recv::ConsensusAuthNRecv;
 use crate::state::State;
+use crate::state::StateMsgs;
 use crate::state::StateThread;
 
 /// Index used to identify parties in a given round.
@@ -193,8 +194,10 @@ pub struct ConsensusComponent<
             PrinCodec,
             StaticParties<PartyStreamIdx>
         > + Send,
-    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper: Send,
-    Proto::Rounds: SharedMsgs<PartyStreamIdx, Proto::Msg> + Send,
+    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper:
+        OperBatch<H> + Send + Sync,
+    Proto::Rounds: SharedMsgs<PartyStreamIdx, Proto::Msg>
+        + RoundsSubmit<H::HashID> + Send,
     Proto::Msg: Clone + Debug + Send,
     Proto::Out: Send,
     AuthN: Clone
@@ -419,7 +422,11 @@ where
             StaticParties<PartyStreamIdx>
         > + Send,
     <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper:
-        'static + Send,
+        'static + OperBatch<H> + Send + Sync,
+    Proto::Rounds: 'static
+        + SharedMsgs<PartyStreamIdx, Proto::Msg>
+        + RoundsSubmit<H::HashID>
+        + Send,
     Proto::Msg: 'static + Clone + Debug + Send,
     Proto::Out: 'static + Send,
     Ctx: 'static
@@ -428,7 +435,6 @@ where
         + NSNameCachesCtx
         + Send
         + Sync,
-    Proto::Rounds: 'static + SharedMsgs<PartyStreamIdx, Proto::Msg> + Send,
     Ctx::NameCaches: NSNameCachesCtx,
     PrinCodec: Clone + Codec<AuthN::Prin> + Send,
     PrinCodec::Param: Default,
@@ -495,7 +501,7 @@ where
                 return Err(ConsensusComponentRunError);
             }
         };
-        let mut rounds = match proto.rounds(round_ids) {
+        let rounds = match proto.rounds(round_ids) {
             Ok(proto) => proto,
             Err(err) => {
                 error!(target: "consensus-component",
@@ -505,7 +511,7 @@ where
                 return Err(ConsensusComponentRunError);
             }
         };
-        let state = State::new();
+        let state = State::new(rounds);
         let state = Arc::new(state);
         let peer_dispatch =
             PeerSessionDispatch::new(peers_large_obj_config, state.clone());
@@ -546,10 +552,10 @@ where
 
         let notify = state.notify();
         let (state_thread, round_reporter) =
-            StateThread::create(state, shutdown.clone());
+            StateThread::create(state.clone(), shutdown.clone(), H::default());
         let mut authn_msg_recv = ConsensusAuthNRecv::create(
             round_reporter,
-            rounds.clone(),
+            state.clone(),
             notify.clone()
         );
         let multicast: MulticastDatagramBus<
@@ -573,7 +579,7 @@ where
             shutdown.clone(),
             notify,
             authn_msg_recv.clone(),
-            rounds.clone()
+            StateMsgs::from(state.clone())
         ) {
             Ok(multicast) => multicast,
             Err(err) => {
@@ -610,16 +616,9 @@ where
             }
         };
 
-        if let Err(err) =
-            rounds.set_parties(prin_codec, self_party, &party_data)
+        if let Err(err) = state.init_rounds(prin_codec, self_party, &party_data)
         {
             error!("error setting parties: {}", err);
-
-            return Err(ConsensusComponentRunError);
-        }
-
-        if let Err(err) = rounds.advance() {
-            error!("error creating first round: {}", err);
 
             return Err(ConsensusComponentRunError);
         }
@@ -629,7 +628,7 @@ where
             error!("error setting parties: {}", err);
         }
 
-        let state_join = state_thread.start(rounds.clone());
+        let state_join = state_thread.start();
 
         debug!(target: "consensus-component",
                "starting multicaster");
@@ -736,7 +735,7 @@ impl Standalone
         StandaloneCtx,
         AscendingCount<u128>,
         AscendingCount<u128>,
-        PBFTProto<AscendingCount<u128>, String>,
+        PBFTProto<SHA3Algo, AscendingCount<u128>, String>,
         PBFTMsgPERCodec,
         SHA3Algo,
         AscendingCount<LargeObjID>,
@@ -913,7 +912,7 @@ impl StandaloneService
         StandaloneCtx,
         AscendingCount<u128>,
         AscendingCount<u128>,
-        PBFTProto<AscendingCount<u128>, String>,
+        PBFTProto<SHA3Algo, AscendingCount<u128>, String>,
         PBFTMsgPERCodec,
         SHA3Algo,
         AscendingCount<LargeObjID>,

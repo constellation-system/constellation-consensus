@@ -31,7 +31,6 @@ use constellation_auth::authn::AuthNMsgRecv;
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_common::codec::Codec;
 use constellation_common::error::ErrorScope;
-use constellation_common::error::MutexPoison;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
 use constellation_common::hashid::HashAlgo;
@@ -42,6 +41,10 @@ use constellation_common::sync::Notify;
 use constellation_component_common::bus::large_obj::dispatch::SessionDispatch;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
+use constellation_consensus_common::oper::OperBatch;
+use constellation_consensus_common::round::RoundsAdvance;
+use constellation_consensus_common::round::RoundsSubmit;
+use constellation_consensus_common::round::RoundsUpdate;
 use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::frags::Frags;
 use constellation_streams::frags::OutboundFrags;
@@ -57,8 +60,20 @@ use log::warn;
 
 use crate::state::State;
 
-pub(crate) struct PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
-where
+pub(crate) struct PeerSessionDispatch<
+    R,
+    RoundID,
+    H,
+    IDs,
+    Prin,
+    Seal,
+    Oper,
+    SealCodec
+> where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default,
@@ -67,11 +82,12 @@ where
     H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     IDs: IDGen + Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
+    Oper: OperBatch<H> + Send + Sync,
     Prin: Clone + Display + Eq + Hash + Send + Sync {
     hash: PhantomData<H>,
     ids: PhantomData<IDs>,
     sessions: Arc<Mutex<HashMap<Prin, PeerSession>>>,
-    state: Arc<State<RoundID, H::HashID, Seal>>,
+    state: Arc<State<R, RoundID, H, Seal, Oper>>,
     config: LargeObjProtoConfig<
         <ConsensusCtlCodec<RoundID, H, Seal, SealCodec> as Codec<
             ConsensusCtl<RoundID, H::HashID, Seal>
@@ -80,27 +96,36 @@ where
     >
 }
 
-#[derive(Clone)]
-pub(crate) struct PeerSessionRecv<RoundID, H, Prin, Seal>
+pub(crate) struct PeerSessionRecv<R, RoundID, H, Prin, Seal, Oper>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Oper: OperBatch<H> + Send + Sync,
     Seal: Clone + Send {
     hash: PhantomData<H>,
-    state: Arc<State<RoundID, H, Seal>>,
+    state: Arc<State<R, RoundID, H, Seal, Oper>>,
     sessions: Arc<Mutex<HashMap<Prin, PeerSession>>>
 }
 
-#[derive(Clone)]
-pub(crate) struct PeerSessionMsgs<RoundID, H, Prin, Seal>
+pub(crate) struct PeerSessionMsgs<R, RoundID, H, Prin, Seal, Oper>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     H: HashAlgo,
     H::HashID: Clone + Display + Eq + Hash + HashID + Send + Sync,
+    Oper: OperBatch<H> + Send + Sync,
     Seal: Clone + Send {
-    state: Arc<State<RoundID, H::HashID, Seal>>,
+    state: Arc<State<R, RoundID, H, Seal, Oper>>,
     prin: Prin
 }
 
@@ -128,13 +153,63 @@ pub(crate) enum PeerSessionRecvError<Prin> {
     MutexPoison
 }
 
-unsafe impl<RoundID, H, IDs, Prin, Seal, SealCodec> Send
-    for PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+impl<R, RoundID, H, Prin, Seal, Oper> Clone
+    for PeerSessionRecv<R, RoundID, H, Prin, Seal, Oper>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Clone + Send
+{
+    fn clone(&self) -> Self {
+        PeerSessionRecv {
+            hash: self.hash,
+            sessions: self.sessions.clone(),
+            state: self.state.clone()
+        }
+    }
+}
+
+impl<R, RoundID, H, Prin, Seal, Oper> Clone
+    for PeerSessionMsgs<R, RoundID, H, Prin, Seal, Oper>
+where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Eq + Hash + HashID + Send + Sync,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Clone + Send
+{
+    fn clone(&self) -> Self {
+        PeerSessionMsgs {
+            state: self.state.clone(),
+            prin: self.prin.clone()
+        }
+    }
+}
+
+unsafe impl<R, RoundID, H, IDs, Prin, Seal, Oper, SealCodec> Send
+    for PeerSessionDispatch<R, RoundID, H, IDs, Prin, Seal, Oper, SealCodec>
+where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default,
     Seal: Clone + Send,
+    Oper: OperBatch<H> + Send + Sync,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     IDs: IDGen + Iterator<Item = LargeObjID> + Send,
@@ -143,13 +218,18 @@ where
 {
 }
 
-unsafe impl<RoundID, H, IDs, Prin, Seal, SealCodec> Sync
-    for PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+unsafe impl<R, RoundID, H, IDs, Prin, Seal, Oper, SealCodec> Sync
+    for PeerSessionDispatch<R, RoundID, H, IDs, Prin, Seal, Oper, SealCodec>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default,
     Seal: Clone + Send,
+    Oper: OperBatch<H> + Send + Sync,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     IDs: IDGen + Iterator<Item = LargeObjID> + Send,
@@ -158,35 +238,52 @@ where
 {
 }
 
-unsafe impl<RoundID, H, Prin, Seal> Send
-    for PeerSessionRecv<RoundID, H, Prin, Seal>
+unsafe impl<R, RoundID, H, Prin, Seal, Oper> Send
+    for PeerSessionRecv<R, RoundID, H, Prin, Seal, Oper>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
-    Seal: Clone + Send
+    Seal: Clone + Send,
+    Oper: OperBatch<H> + Send + Sync
 {
 }
 
-unsafe impl<RoundID, H, Prin, Seal> Sync
-    for PeerSessionRecv<RoundID, H, Prin, Seal>
+unsafe impl<R, RoundID, H, Prin, Seal, Oper> Sync
+    for PeerSessionRecv<R, RoundID, H, Prin, Seal, Oper>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
-    Seal: Clone + Send
+    Seal: Clone + Send,
+    Oper: OperBatch<H> + Send + Sync
 {
 }
 
-impl<RoundID, H, Prin, Seal>
+impl<R, RoundID, H, Prin, Seal, Oper>
     LargeObjMsgs<H, ConsensusCtl<RoundID, H::HashID, Seal>>
-    for PeerSessionMsgs<RoundID, H, Prin, Seal>
+    for PeerSessionMsgs<R, RoundID, H, Prin, Seal, Oper>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     H: Clone + HashAlgo,
     H::HashID: Clone + Display + Eq + Hash + HashID + Send + Sync,
-    Seal: Clone + Send
+    Seal: Clone + Send,
+    Oper: OperBatch<H> + Send + Sync
 {
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<H::HashID, Encode>>
@@ -242,22 +339,29 @@ impl Drop for PeerSession {
     }
 }
 
-impl<RoundID, Prin, H, Seal> AuthNMsgRecv<Prin, ConsensusCtl<RoundID, H, Seal>>
-    for PeerSessionRecv<RoundID, H, Prin, Seal>
+impl<R, RoundID, Prin, H, Seal, Oper>
+    AuthNMsgRecv<Prin, ConsensusCtl<RoundID, H::HashID, Seal>>
+    for PeerSessionRecv<R, RoundID, H, Prin, Seal, Oper>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: Clone + Display + Hash + HashID + Eq + Send + Sync,
+    H: Clone + Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
-    Seal: Clone + Send
+    Seal: Clone + Send,
+    Oper: OperBatch<H> + Send + Sync
 {
     /// Errors that can occur reporting messages.
-    type RecvError = MutexPoison;
+    type RecvError = WithMutexPoison<R::SubmitError>;
 
     /// Receive an authenticated message.
     fn recv_auth_msg(
         &mut self,
         prin: &Prin,
-        msg: ConsensusCtl<RoundID, H, Seal>
+        msg: ConsensusCtl<RoundID, H::HashID, Seal>
     ) -> Result<(), Self::RecvError> {
         debug!(target: "peer-session-recv",
                "received message from peer {}",
@@ -279,9 +383,13 @@ where
     }
 }
 
-impl<RoundID, H, IDs, Prin, Seal, SealCodec>
-    PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+impl<R, RoundID, H, IDs, Prin, Seal, Oper, SealCodec>
+    PeerSessionDispatch<R, RoundID, H, IDs, Prin, Seal, Oper, SealCodec>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default,
@@ -290,7 +398,8 @@ where
     H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     IDs: IDGen + Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
-    Prin: Clone + Display + Eq + Hash + Send + Sync
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Oper: OperBatch<H> + Send + Sync
 {
     pub(crate) fn new(
         config: LargeObjProtoConfig<
@@ -299,7 +408,7 @@ where
             >>::Param,
             IDs::Config
         >,
-        state: Arc<State<RoundID, H::HashID, Seal>>
+        state: Arc<State<R, RoundID, H, Seal, Oper>>
     ) -> Self {
         let sessions = Arc::new(Mutex::new(HashMap::new()));
 
@@ -313,7 +422,7 @@ where
     }
 }
 
-impl<RoundID, H, IDs, Prin, Seal, SealCodec>
+impl<R, RoundID, H, IDs, Prin, Seal, Oper, SealCodec>
     SessionDispatch<
         H,
         ConsensusCtl<RoundID, H::HashID, Seal>,
@@ -321,11 +430,15 @@ impl<RoundID, H, IDs, Prin, Seal, SealCodec>
         PassthruMsgAuthN<ConsensusCtl<RoundID, H::HashID, Seal>, Prin>,
         ConsensusCtlCodec<RoundID, H, Seal, SealCodec>,
         IDs,
-        PeerSessionMsgs<RoundID, H, Prin, Seal>,
-        PeerSessionRecv<RoundID, H::HashID, Prin, Seal>,
+        PeerSessionMsgs<R, RoundID, H, Prin, Seal, Oper>,
+        PeerSessionRecv<R, RoundID, H, Prin, Seal, Oper>,
         Prin
-    > for PeerSessionDispatch<RoundID, H, IDs, Prin, Seal, SealCodec>
+    > for PeerSessionDispatch<R, RoundID, H, IDs, Prin, Seal, Oper, SealCodec>
 where
+    R: RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<H::HashID>
+        + Send,
     RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
@@ -334,7 +447,8 @@ where
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     Seal: Clone + Send,
     SealCodec: Clone + Codec<Seal>,
-    SealCodec::Param: Clone + Default
+    SealCodec::Param: Clone + Default,
+    Oper: OperBatch<H> + Send + Sync
 {
     type SessionError = PeerSessionDispatchError<
         Prin,
@@ -358,8 +472,8 @@ where
                 (),
                 ConsensusCtlCodec<RoundID, H, Seal, SealCodec>,
                 IDs,
-                PeerSessionMsgs<RoundID, H, Prin, Seal>,
-                PeerSessionRecv<RoundID, H::HashID, Prin, Seal>,
+                PeerSessionMsgs<R, RoundID, H, Prin, Seal, Oper>,
+                PeerSessionRecv<R, RoundID, H, Prin, Seal, Oper>,
                 OutboundFrags
             >
         ),
