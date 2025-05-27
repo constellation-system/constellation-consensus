@@ -44,7 +44,6 @@ use constellation_common::sync::Notify;
 use constellation_component_common::consensus_ctl::ConsensusCtlRound;
 use constellation_component_common::PartyStreamIdx;
 use constellation_consensus_common::oper::OperBatch;
-use constellation_consensus_common::oper::OperBatchResult;
 use constellation_consensus_common::round::RoundMsg;
 use constellation_consensus_common::round::RoundsAdvance;
 use constellation_consensus_common::round::RoundsRecv;
@@ -254,12 +253,6 @@ where
             .map_err(|_| MutexPoison)
     }
 
-    // if changed {
-    // self.notify.notify()?
-    // }
-    //
-    // Ok(())
-    // }
     pub(crate) fn add_hashes(
         &self,
         hashes: Vec<H::HashID>
@@ -273,7 +266,6 @@ where
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .submit_elems(hashes.into_iter())
             .map_err(|err| WithMutexPoison::Inner { error: err })?;
-
         self.notify
             .notify()
             .map_err(|_| WithMutexPoison::MutexPoison)
@@ -343,63 +335,60 @@ where
         round: RoundID,
         oper: Oper
     ) -> (bool, Option<Instant>) {
-        match oper.take_batch(&self.hash) {
-            Ok(OperBatchResult::Hashes(batch)) => {
-                if let Err(err) = self.state.add_round(round, batch) {
-                    error!(target: "consensus-component-state-thread",
-                           "error adding round: {}",
-                           err);
+        match self.state.rounds.lock() {
+            Ok(mut rounds) => {
+                if let Err(err) = rounds.update(&oper) {
+                    debug!(target: "consensus-component-state-thread",
+                       "error applying state update: {}",
+                       err);
 
                     (false, None)
                 } else {
-                    match self.state.rounds.lock() {
-                        Ok(mut rounds) => match rounds.advance() {
-                            Ok(Some((_, deadline))) => {
-                                if let Err(err) = self.state.notify().notify() {
-                                    error!(target: "consensus-component-state-thread",
-                                           "error notifying sender: {}",
-                                           err);
-                                }
-
-                                (true, deadline)
-                            }
-                            // XXX this will go away
-                            Ok(None) => {
-                                if let Err(err) = self.state.notify().notify() {
-                                    error!(target: "consensus-component-state-thread",
-                                           "error notifying sender: {}",
-                                           err);
-                                }
-
-                                (true, None)
-                            }
-                            Err(err) => {
+                    match oper.take_batch(&self.hash) {
+                        Ok(Some(batch)) => {
+                            if let Err(err) = self.state.add_round(round, batch)
+                            {
                                 error!(target: "consensus-component-state-thread",
+                               "error adding round: {}",
+                               err);
+
+                                (false, None)
+                            } else {
+                                match rounds.advance() {
+                                    Ok(Some((_, deadline))) => {
+                                        if let Err(err) =
+                                            self.state.notify().notify()
+                                        {
+                                            error!(target: "consensus-component-state-thread",
+                                           "error notifying sender: {}",
+                                           err);
+                                        }
+
+                                        (true, deadline)
+                                    }
+                                    // XXX this will go away
+                                    Ok(None) => {
+                                        if let Err(err) =
+                                            self.state.notify().notify()
+                                        {
+                                            error!(target: "consensus-component-state-thread",
+                                           "error notifying sender: {}",
+                                           err);
+                                        }
+
+                                        (true, None)
+                                    }
+                                    Err(err) => {
+                                        error!(target: "consensus-component-state-thread",
                                        "error advancing to next round: {}",
                                        err);
 
-                                (false, None)
+                                        (false, None)
+                                    }
+                                }
                             }
-                        },
-                        Err(_) => {
-                            error!(target: "consensus-component-state-thread",
-                                   "mutex poisoned");
-
-                            (false, None)
                         }
-                    }
-                }
-            }
-            Ok(OperBatchResult::None(oper)) => match self.state.rounds.lock() {
-                Ok(mut rounds) => {
-                    if let Err(err) = rounds.update(oper) {
-                        debug!(target: "consensus-component-state-thread",
-                           "error applying state update: {}",
-                           err);
-
-                        (false, None)
-                    } else {
-                        match rounds.advance() {
+                        Ok(None) => match rounds.advance() {
                             Ok(Some((_, deadline))) => {
                                 if let Err(err) = self.state.notify().notify() {
                                     error!(target: "consensus-component-state-thread",
@@ -426,20 +415,20 @@ where
 
                                 (false, None)
                             }
+                        },
+                        Err(err) => {
+                            error!(target: "consensus-component-state-thread",
+                               "error getting hashes for batch: {}",
+                               err);
+
+                            (false, None)
                         }
                     }
                 }
-                Err(_) => {
-                    error!(target: "consensus-component-state-thread",
-                           "mutex poisoned");
-
-                    (false, None)
-                }
-            },
-            Err(err) => {
+            }
+            Err(_) => {
                 error!(target: "consensus-component-state-thread",
-                       "error getting hashes for batch: {}",
-                       err);
+                       "mutex poisoned");
 
                 (false, None)
             }

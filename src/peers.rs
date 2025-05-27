@@ -141,9 +141,6 @@ pub(crate) enum PeerSessionDispatchError<Prin, Codec> {
     Exists {
         prin: Prin
     },
-    Unknown {
-        prin: Prin
-    },
     MutexPoison
 }
 
@@ -536,11 +533,8 @@ where
     ) -> Result<(), Error> {
         match self {
             PeerSessionDispatchError::Proto { err } => err.fmt(f),
-            PeerSessionDispatchError::Unknown { prin } => {
-                write!(f, "no processor associated with {}", prin)
-            }
             PeerSessionDispatchError::Exists { prin } => {
-                write!(f, "processor session already exists for {}", prin)
+                write!(f, "peerr session already exists for {}", prin)
             }
             PeerSessionDispatchError::MutexPoison => {
                 write!(f, "mutex poisoned")
