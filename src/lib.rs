@@ -28,5 +28,6 @@
 pub mod component;
 pub mod config;
 
+mod peers;
 mod recv;
 mod state;

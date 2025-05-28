@@ -25,60 +25,103 @@ use std::sync::RwLock;
 
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_common::error::MutexPoison;
+use constellation_common::hashid::HashAlgo;
+use constellation_common::hashid::HashID;
 use constellation_common::sync::Notify;
 use constellation_component_common::PartyStreamIdx;
+use constellation_consensus_common::oper::OperBatch;
 use constellation_consensus_common::round::RoundMsg;
 use constellation_consensus_common::round::RoundsRecv;
+use constellation_consensus_common::round::RoundsSubmit;
 use constellation_consensus_common::state::RoundResultReporter;
 use log::error;
 use log::warn;
 
-pub(crate) struct ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
-where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+use crate::state::State;
+
+pub(crate) struct ConsensusAuthNRecv<
+    R,
+    Reporter,
+    H,
+    RoundID,
+    Prin,
+    Oper,
+    Seal,
+    Msg
+> where
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
+        + RoundsSubmit<H::HashID>
+        + Send
+        + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + Ord + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send {
+    Msg: RoundMsg<RoundID> + Send,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Send {
     oper: PhantomData<Oper>,
     msg: PhantomData<Msg>,
     round_ids: PhantomData<RoundID>,
     prins: Arc<RwLock<HashMap<Prin, PartyStreamIdx>>>,
     reporter: Reporter,
     notify: Notify,
-    rounds: R
+    state: Arc<State<R, RoundID, H, Seal, Oper>>
 }
 
-unsafe impl<R, Reporter, RoundID, Prin, Oper, Msg> Send
-    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+unsafe impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> Send
+    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
+        + RoundsSubmit<H::HashID>
+        + Send
+        + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + Ord + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send
+    Msg: RoundMsg<RoundID> + Send,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Send
 {
 }
 
-unsafe impl<R, Reporter, RoundID, Prin, Oper, Msg> Sync
-    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+unsafe impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> Sync
+    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
+        + RoundsSubmit<H::HashID>
+        + Send
+        + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + Ord + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send
+    Msg: RoundMsg<RoundID> + Send,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Send
 {
 }
 
-impl<R, Reporter, RoundID, Prin, Oper, Msg> Clone
-    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> Clone
+    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
 where
-    R: Clone + RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    R: Clone
+        + RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
+        + RoundsSubmit<H::HashID>
+        + Send
+        + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Reporter: Clone + RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + Ord + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send
+    Msg: RoundMsg<RoundID> + Send,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Send
 {
     #[inline]
     fn clone(&self) -> Self {
@@ -89,24 +132,31 @@ where
             prins: self.prins.clone(),
             reporter: self.reporter.clone(),
             notify: self.notify.clone(),
-            rounds: self.rounds.clone()
+            state: self.state.clone()
         }
     }
 }
 
-impl<R, Reporter, RoundID, Prin, Oper, Msg>
-    ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
+    ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
+        + RoundsSubmit<H::HashID>
+        + Send
+        + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + Ord + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send
+    Msg: RoundMsg<RoundID> + Send,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Send
 {
     #[inline]
     pub(crate) fn create(
         reporter: Reporter,
-        rounds: R,
+        state: Arc<State<R, RoundID, H, Seal, Oper>>,
         notify: Notify
     ) -> Self {
         ConsensusAuthNRecv {
@@ -116,7 +166,7 @@ where
             prins: Arc::new(RwLock::new(HashMap::new())),
             reporter: reporter,
             notify: notify,
-            rounds: rounds
+            state: state
         }
     }
 
@@ -135,14 +185,21 @@ where
     }
 }
 
-impl<R, Reporter, RoundID, Prin, Oper, Msg> Drop
-    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> Drop
+    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
+        + RoundsSubmit<H::HashID>
+        + Send
+        + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + Ord + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send
+    Msg: RoundMsg<RoundID> + Send,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Send
 {
     fn drop(&mut self) {
         if let Err(err) = self.notify.notify() {
@@ -153,14 +210,21 @@ where
     }
 }
 
-impl<R, Reporter, RoundID, Prin, Oper, Msg> AuthNMsgRecv<Prin, Msg>
-    for ConsensusAuthNRecv<R, Reporter, RoundID, Prin, Oper, Msg>
+impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> AuthNMsgRecv<Prin, Msg>
+    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg> + Send + Sync,
+    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
+        + RoundsSubmit<H::HashID>
+        + Send
+        + Sync,
+    H: HashAlgo,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
     Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + Ord + Send,
+    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
     Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send
+    Msg: RoundMsg<RoundID> + Send,
+    Oper: OperBatch<H> + Send + Sync,
+    Seal: Send
 {
     type RecvError = MutexPoison;
 
@@ -175,7 +239,7 @@ where
         match guard.get(prin) {
             Some(party) => {
                 if let Err(err) =
-                    self.rounds.recv(&mut self.reporter, party, msg)
+                    self.state.recv(&mut self.reporter, party, msg)
                 {
                     warn!(target: "consensus-recv-authn-msg",
                           "error receiving message from {}: {}",
