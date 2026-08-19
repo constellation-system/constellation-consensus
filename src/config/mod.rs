@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -18,20 +18,17 @@
 
 use constellation_auth::config::TestAuthNConfig;
 use constellation_auth::config::TestCredConfig;
-#[cfg(feature = "standalone")]
-use constellation_channels::config::ChannelRegistryChannelsConfig;
-use constellation_channels::config::ChannelRegistryConfig;
 use constellation_channels::config::CompoundFarChannelConfig;
 use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::CompoundXfrmCreateParam;
 use constellation_channels::config::ThreadedFlowsParams;
 use constellation_channels::config::ThreadedNSNameCachesConfig;
 #[cfg(feature = "standalone")]
-use constellation_common::codec::Codec;
+use constellation_common::codec::Decoder;
+#[cfg(feature = "standalone")]
+use constellation_common::codec::Encoder;
 #[cfg(feature = "standalone")]
 use constellation_common::ids::AscendingCount;
-use constellation_common::ids::IDGen;
-use constellation_component_common::config::DispatchLargeObjBusConfig;
 use constellation_component_common::config::MulticastDatagramBusConfig;
 #[cfg(feature = "standalone")]
 use constellation_pbft::config::PBFTConfig;
@@ -71,7 +68,8 @@ pub struct ConsensusComponentConfig<
     consensus_registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
     #[serde(flatten)]
     consensus:
-        ConsensusConfig<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>,
+        ConsensusConfig<PartyID, PartyCodec, AuthN,
+                        Proto, Channels, Epochs, Endpoint>,
     peers: PeersConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
 }
 
@@ -81,6 +79,7 @@ pub struct ConsensusComponentConfig<
 pub struct ConsensusConfig<
     PartyID,
     PartyCodec,
+    AuthN,
     Proto,
     Channels,
     Epochs,
@@ -98,7 +97,8 @@ pub struct ConsensusConfig<
     #[serde(default)]
     party_codec: PartyCodec,
     #[serde(flatten)]
-    multicast: MulticastDatagramBusConfig<PartyID, Channels, Epochs, Endpoint>
+    multicast: MulticastDatagramBusConfig<Channels, Epochs, PartyID,
+                                          AuthN, Endpoint>
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
@@ -191,8 +191,9 @@ where
     }
 }
 
-impl<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>
-    ConsensusConfig<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>
+impl<PartyID, PartyCodec, AuthN, Proto, Channels, Epochs, Endpoint>
+    ConsensusConfig<PartyID, PartyCodec, AuthN, Proto,
+                    Channels, Epochs, Endpoint>
 where
     PartyCodec: Default,
     Channels: Default,
@@ -202,7 +203,8 @@ where
     #[inline]
     pub fn multicast(
         &self
-    ) -> &MulticastDatagramBusConfig<PartyID, Channels, Epochs, Endpoint> {
+    ) -> &MulticastDatagramBusConfig<Channels, Epochs, PartyID,
+                                     AuthN, Endpoint> {
         &self.multicast
     }
 
@@ -228,14 +230,10 @@ where
         Proto,
         PartyID,
         PartyCodec,
-        MulticastDatagramBusConfig<PartyID, Channels, Epochs, Endpoint>
+        MulticastDatagramBusConfig<Channels, Epochs, PartyID,
+                                   AuthN, Endpoint>
     ) {
-        (
-            self.proto,
-            self.self_party,
-            self.party_codec,
-            self.multicast
-        )
+        (self.proto, self.self_party, self.party_codec, self.multicast)
     }
 }
 

@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -17,118 +17,55 @@
 // <https://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
-use std::fmt::Display;
-use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_common::error::MutexPoison;
-use constellation_common::hashid::HashAlgo;
-use constellation_common::hashid::HashID;
 use constellation_common::sync::Notify;
 use constellation_component_common::PartyStreamIdx;
-use constellation_consensus_common::oper::OperBatch;
-use constellation_consensus_common::round::RoundMsg;
+use constellation_consensus_common::parties::RoundPartyIDTypes;
+use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
 use constellation_consensus_common::round::RoundsRecv;
-use constellation_consensus_common::round::RoundsSubmit;
-use constellation_consensus_common::state::RoundResultReporter;
 use log::error;
 use log::warn;
 
 use crate::state::State;
+use crate::types::ConsensusRecvTypes;
+use crate::types::ConsensusStateTypes;
 
-pub(crate) struct ConsensusAuthNRecv<
-    R,
-    Reporter,
-    H,
-    RoundID,
-    Prin,
-    Oper,
-    Seal,
-    Msg
-> where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
-        + RoundsSubmit<H::HashID>
-        + Send
-        + Sync,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send {
-    oper: PhantomData<Oper>,
-    msg: PhantomData<Msg>,
-    round_ids: PhantomData<RoundID>,
-    prins: Arc<RwLock<HashMap<Prin, PartyStreamIdx>>>,
-    reporter: Reporter,
+pub(crate) struct ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
+where
+    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128>,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>
+{
+    party_types: PhantomData<IDTypes>,
+    proto_types: PhantomData<ProtoTypes>,
+    types: PhantomData<Types>,
+    prins: Arc<RwLock<HashMap<Types::Prin, PartyStreamIdx>>>,
+    reporter: Types::Reporter,
     notify: Notify,
-    state: Arc<State<R, RoundID, H, Seal, Oper>>
+    state: Arc<State<IDTypes, Types>>
 }
 
-unsafe impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> Send
-    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
+impl<IDTypes, ProtoTypes, Types> Clone
+    for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
-        + RoundsSubmit<H::HashID>
-        + Send
-        + Sync,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send
-{
-}
-
-unsafe impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> Sync
-    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
-where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
-        + RoundsSubmit<H::HashID>
-        + Send
-        + Sync,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send
-{
-}
-
-impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> Clone
-    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
-where
-    R: Clone
-        + RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
-        + RoundsSubmit<H::HashID>
-        + Send
-        + Sync,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Reporter: Clone + RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send
+    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>
 {
     #[inline]
     fn clone(&self) -> Self {
         ConsensusAuthNRecv {
-            oper: self.oper,
-            msg: self.msg,
-            round_ids: self.round_ids,
+            id_types: self.id_types,
+            proto_types: self.proto_types,
+            types: self.types,
             prins: self.prins.clone(),
             reporter: self.reporter.clone(),
             notify: self.notify.clone(),
@@ -137,26 +74,19 @@ where
     }
 }
 
-impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
-    ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
+impl<IDTypes, ProtoTypes, Types>
+    ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
-        + RoundsSubmit<H::HashID>
-        + Send
-        + Sync,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send
+    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128>,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>
 {
     #[inline]
     pub(crate) fn create(
-        reporter: Reporter,
-        state: Arc<State<R, RoundID, H, Seal, Oper>>,
+        reporter: Types::Reporter,
+        state: Arc<State<IDTypes, Types>>,
         notify: Notify
     ) -> Self {
         ConsensusAuthNRecv {
@@ -176,7 +106,7 @@ where
         prins: I
     ) -> Result<(), MutexPoison>
     where
-        I: Iterator<Item = (PartyStreamIdx, Prin)> {
+        I: Iterator<Item = (PartyStreamIdx, Types::Prin)> {
         let mut guard = self.prins.write().map_err(|_| MutexPoison)?;
 
         *guard = prins.map(|(a, b)| (b, a)).collect();
@@ -185,21 +115,14 @@ where
     }
 }
 
-impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> Drop
-    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
+impl<IDTypes, ProtoTypes, Types> Drop for
+    ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
-        + RoundsSubmit<H::HashID>
-        + Send
-        + Sync,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send
+    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128>,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>
 {
     fn drop(&mut self) {
         if let Err(err) = self.notify.notify() {
@@ -210,29 +133,22 @@ where
     }
 }
 
-impl<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg> AuthNMsgRecv<Prin, Msg>
-    for ConsensusAuthNRecv<R, Reporter, H, RoundID, Prin, Oper, Seal, Msg>
+impl<IDTypes, ProtoTypes, Types>
+    AuthNMsgRecv<Types::Prin, ProtoTypes::Msg, Types::AuthNMsg>
+    for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>
-        + RoundsSubmit<H::HashID>
-        + Send
-        + Sync,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Reporter: RoundResultReporter<RoundID, Oper> + Send + Sync,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Prin: Display + Eq + Hash + Send,
-    Msg: RoundMsg<RoundID> + Send,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send
+    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>
 {
     type RecvError = MutexPoison;
 
     /// Receive an authenticated message.
     fn recv_auth_msg(
         &mut self,
-        prin: &Prin,
-        msg: Msg
+        prin: &Types::Prin,
+        msg: ProtoTypes::Msg
     ) -> Result<(), Self::RecvError> {
         let guard = self.prins.read().map_err(|_| MutexPoison)?;
 
