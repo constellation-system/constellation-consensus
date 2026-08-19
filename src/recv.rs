@@ -56,6 +56,7 @@ impl<IDTypes, ProtoTypes, Types> Clone
     for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128>,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
         + ConsensusStateTypes<IDTypes>
@@ -138,6 +139,7 @@ impl<IDTypes, ProtoTypes, Types>
     for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128>,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
         + ConsensusStateTypes<IDTypes>
@@ -147,10 +149,10 @@ where
     /// Receive an authenticated message.
     fn recv_auth_msg(
         &mut self,
-        prin: &Types::Prin,
-        msg: ProtoTypes::Msg
+        msg: Types::AuthNMsg
     ) -> Result<(), Self::RecvError> {
         let guard = self.prins.read().map_err(|_| MutexPoison)?;
+        let (prin, msg) = msg.take();
 
         match guard.get(prin) {
             Some(party) => {

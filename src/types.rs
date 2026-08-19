@@ -47,9 +47,12 @@ use constellation_consensus_common::round::RoundsUpdate;
 use constellation_consensus_common::state::RoundResultReporter;
 use constellation_streams::large_obj::LargeObjID;
 
+use crate::peers::PeerSessionMsgs;
+use crate::peers::PeerSessionRecv;
+
 pub trait ConsensusBaseTypes {
     type HashID: Clone + Display + Hash + HashID + Eq + Send;
-    type Hash: HashAlgo<HashID = Self::HashID>;
+    type Hash: Clone + HashAlgo<HashID = Self::HashID>;
     type Oper: OperBatch<Self::Hash>;
     type Seal;
     type SealCodec: Clone + Decoder<Self::Seal> + Encoder<Self::Seal>
@@ -69,7 +72,7 @@ pub trait ConsensusStateTypes<IDTypes>: ConsensusBaseTypes
 where
     IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> {
-    type SubmitError: Display + ScopedError;
+    type SubmitError: Debug + Display + ScopedError;
     type AdvanceError: Debug + Display;
     type Rounds: RoundsAdvance<
         IDTypes::RoundID,
@@ -105,14 +108,19 @@ where
     IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128>,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> {
-    type PeerPrin: Display + Eq + Hash + Send;
+    type PeerPrin: Debug + Display + Eq + Hash + Send;
+    type IDsCreateError: Debug + Display + ScopedError;
     type IDsConfig: Clone + Default;
     type IDs: Create<Config = Self::IDsConfig>
         + Iterator<Item = LargeObjID> + Send;
     type CtlAuthNMsg: AuthNed<
+        Self::PeerPrin,
         ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>,
-        ProtoTypes::Msg
     >;
+    type CtlCodecCreateError: Debug + Display + ScopedError;
+    type CtlCodec: Clone + Create<CreateError = Self::CtlCodecCreateError>
+        + Decoder<ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>>
+        + Encoder<ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>>;
 }
 
 pub trait ConsensusPeerSessionDispatchTypes<IDTypes, ProtoTypes>:
@@ -122,10 +130,13 @@ where
     IDTypes::RoundID: From<u128> + Into<u128>,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> {
     type SessionDispTypes: SessionDispatchTypes<
+        SessionPrin = Self::PeerPrin,
         MsgPrin = Self::PeerPrin,
         InMsg = ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>,
         OutMsg = ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>,
-        AuthNMsg = Self::CtlAuthNMsg
+        AuthNMsg = Self::CtlAuthNMsg,
+        Msgs = PeerSessionMsgs<IDTypes, ProtoTypes, Self>,
+        Recv = PeerSessionRecv<IDTypes, ProtoTypes, Self>
     >;
 }
 
@@ -161,7 +172,6 @@ pub trait ConsensusTypes:
         Self::ProtoTypes,
         Config = Self::ConsensusConfig
     >;
-
     type PeerChansConfig;
     type PeerEpochsConfig: Default;
     type PeerMsgAuthConfig;

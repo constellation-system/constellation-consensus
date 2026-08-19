@@ -300,6 +300,7 @@ where Types: ConsensusTypes
         }
 
         let Ok(party_iter) = multicast.parties();
+
         if let Err(err) = authn_msg_recv.set_parties(party_iter) {
             error!("error setting parties: {}", err);
         }
@@ -358,18 +359,9 @@ pub struct StandaloneCreateCleanup {
 }
 
 #[cfg(feature = "standalone")]
-pub type StandaloneRegistry = CompoundFarChannelRegistry<
-    Arc<TestAuthN<String, TestCred>>,
-    UnixDatagramXfrm,
-    UDPDatagramXfrm,
-    FarChannelRegistryID
->;
-
-#[cfg(feature = "standalone")]
 #[derive(Clone)]
 pub struct StandaloneCtx {
     caches: ThreadedNSNameCaches,
-    registry: Arc<StandaloneRegistry>
 }
 
 #[cfg(feature = "standalone")]
@@ -380,26 +372,6 @@ impl NSNameCachesCtx for StandaloneCtx {
     #[inline]
     fn name_caches(&mut self) -> &mut Self::NameCaches {
         &mut self.caches
-    }
-}
-
-#[cfg(feature = "standalone")]
-impl
-    FarChannelRegistryCtx<
-        CompoundFarChannel,
-        CompoundFarChannelThreadedFlows<
-            Arc<TestAuthN<String, TestCred>>,
-            UnixDatagramXfrm,
-            UDPDatagramXfrm,
-            FarChannelRegistryID
-        >,
-        Arc<TestAuthN<String, TestCred>>,
-        CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>
-    > for StandaloneCtx
-{
-    #[inline]
-    fn far_channel_registry(&mut self) -> Arc<StandaloneRegistry> {
-        self.registry.clone()
     }
 }
 
@@ -735,30 +707,8 @@ impl Display for ConsensusComponentRunError {
 #[derive(Clone, Debug)]
 pub struct TestSeal;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum TestCred {
-    IP { addr: SocketAddr },
-    Unix { addr: UnixSocketAddr }
-}
-
 #[derive(Clone)]
 pub struct TestSealCodec;
-
-impl TryFrom<TestCredConfig> for TestCred {
-    type Error = std::io::Error;
-
-    #[inline]
-    fn try_from(val: TestCredConfig) -> Result<TestCred, Self::Error> {
-        match val {
-            TestCredConfig::Unix { unix } => {
-                let addr = UnixSocketAddr::try_from(unix)?;
-
-                Ok(TestCred::Unix { addr: addr })
-            }
-            TestCredConfig::IP { ip } => Ok(TestCred::IP { addr: ip })
-        }
-    }
-}
 
 impl Codec<TestSeal> for TestSealCodec {
     type CreateError = Infallible;
@@ -794,64 +744,6 @@ impl Codec<TestSeal> for TestSealCodec {
         _buf: &[u8]
     ) -> Result<(TestSeal, usize), Self::DecodeError> {
         Ok((TestSeal, 0))
-    }
-}
-
-impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>> for TestCred
-where
-    TestCred: From<Basic>
-{
-    fn from(_val: SSLCred<CompoundFarChannelSessionCred<Basic>>) -> TestCred {
-        panic!("Not supported!")
-    }
-}
-
-impl From<CompoundFarIPChannelXfrmPeerAddr> for TestCred {
-    fn from(val: CompoundFarIPChannelXfrmPeerAddr) -> TestCred {
-        match val {
-            CompoundFarIPChannelXfrmPeerAddr::UDP { udp } => {
-                TestCred::IP { addr: udp }
-            }
-            _ => panic!("Not supported!")
-        }
-    }
-}
-
-impl From<CompoundFarChannelXfrmPeerAddr> for TestCred {
-    fn from(val: CompoundFarChannelXfrmPeerAddr) -> TestCred {
-        match val {
-            CompoundFarChannelXfrmPeerAddr::Unix { unix } => {
-                TestCred::Unix { addr: unix }
-            }
-            CompoundFarChannelXfrmPeerAddr::IP { ip } => TestCred::from(ip)
-        }
-    }
-}
-
-impl<Basic> From<CompoundFarChannelSessionCred<Basic>> for TestCred
-where
-    TestCred: From<Basic>
-{
-    fn from(val: CompoundFarChannelSessionCred<Basic>) -> TestCred {
-        match val {
-            CompoundFarChannelSessionCred::Basic { basic } => {
-                TestCred::from(basic)
-            }
-            _ => panic!("Not supported!")
-        }
-    }
-}
-
-impl Display for TestCred {
-    #[inline]
-    fn fmt(
-        &self,
-        f: &mut Formatter<'_>
-    ) -> Result<(), Error> {
-        match self {
-            TestCred::IP { addr } => write!(f, "ip://{}", addr),
-            TestCred::Unix { addr } => write!(f, "unix://{}", addr)
-        }
     }
 }
 

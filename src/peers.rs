@@ -18,6 +18,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -28,6 +29,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use constellation_auth::authn::AuthNMsgRecv;
+use constellation_common::codec::Encoder;
 use constellation_common::config::Create;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
@@ -96,9 +98,9 @@ struct PeerSession {
 }
 
 #[derive(Debug)]
-pub(crate) enum PeerSessionDispatchError<Prin, Codec> {
+pub(crate) enum PeerSessionDispatchError<Prin, Encoder, Decoder, IDs> {
     Proto {
-        err: LargeObjProtoCreateError<Codec>
+        err: LargeObjProtoCreateError<Encoder, Decoder, IDs>
     },
     Exists {
         prin: Prin
@@ -158,7 +160,7 @@ where
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
-        Encode: Display + ScopedError;
+        Encode: Debug + Display + ScopedError;
 
     fn add_msgs<WrapperCodec, F>(
         &mut self,
@@ -170,8 +172,9 @@ where
         >
     ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
     where
-        WrapperCodec: Clone + Codec<ConsensusCtl<RoundID, H::HashID, Seal>>,
-        WrapperCodec::Param: Default,
+        WrapperCodec: Clone + Create
+            + Encoder<ConsensusCtl<IDTypes::RoundID, Types::HashID, Types::Seal>>,
+        WrapperCodec::Config: Default,
         F: Frags {
         // XXX do retry
 
@@ -226,9 +229,10 @@ where
     /// Receive an authenticated message.
     fn recv_auth_msg(
         &mut self,
-        prin: &Types::Prin,
-        msg: ConsensusCtl<IDTypes::RoundID, Types::HashID, Types::Seal>
+        msg: Types::CtlAuthNMsg
     ) -> Result<(), Self::RecvError> {
+        let (prin, msg) = msg.take();
+
         debug!(target: "peer-session-recv",
                "received message from peer {}",
                prin);
@@ -284,15 +288,25 @@ where
 {
     type SessionError = PeerSessionDispatchError<
         Types::PeerPrin,
-        <ConsensusCtl<IDTypes::RoundID, Types::HashID, Types::Seal> as Create>::CreateError
+        Types::CtlCodecCreateError,
+        Types::CtlCodecCreateError,
+        Types::IDsCreateError
     >;
 
     fn session(
         &self,
-        prin: &Types::SessionPrin,
+        prin: &Types::PeerPrin,
         shutdown: ShutdownFlag,
         notify: Notify
-    ) -> Result<(ShutdownFlag, Types::Msgs, Types::Recv), Self::SessionError> {
+    ) -> Result<
+        (
+            ShutdownFlag,
+            PeerSessionMsgs<IDTypes, ProtoTypes, Types>,
+            PeerSessionRecv<IDTypes, ProtoTypes, Types>,
+
+        ),
+        Self::SessionError
+    > {
         let mut sessions = self
             .sessions
             .lock()
@@ -328,10 +342,32 @@ where
     }
 }
 
-impl<Prin, Codec> Display for PeerSessionDispatchError<Prin, Codec>
+
+impl<Prin, Encoder, Decoder, IDs> ScopedError
+    for PeerSessionDispatchError<Prin, Encoder, Decoder, IDs>
+where
+    Encoder: ScopedError,
+    Decoder: ScopedError,
+    IDs: ScopedError
+{
+    #[inline]
+    fn scope(&self) -> ErrorScope {
+        match self {
+            PeerSessionDispatchError::Proto { err } => err.scope,
+            PeerSessionDispatchError::Exists { .. } |
+            PeerSessionDispatchError::MutexPoison =>
+                ErrorScope::Unrecoverable,
+        }
+    }
+}
+
+impl<Prin, Encoder, Decoder, IDs> Display
+    for PeerSessionDispatchError<Prin, Encoder, Decoder, IDs>
 where
     Prin: Display,
-    Codec: Display
+    Encoder: Display,
+    Decoder: Display,
+    IDs: Display
 {
     #[inline]
     fn fmt(
