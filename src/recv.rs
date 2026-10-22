@@ -17,60 +17,72 @@
 // <https://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::io::Error;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::mpsc::Sender;
+use std::sync::mpsc::SendError;
 
+use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_common::error::MutexPoison;
 use constellation_common::sync::Notify;
-use constellation_component_common::PartyStreamIdx;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
-use constellation_consensus_common::round::RoundsRecv;
+use constellation_streams::multicast::MulticastStreamIdx;
 use log::error;
 use log::warn;
 
-use crate::state::State;
 use crate::types::ConsensusRecvTypes;
 use crate::types::ConsensusStateTypes;
 
 pub(crate) struct ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>
-{
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     party_types: PhantomData<IDTypes>,
     proto_types: PhantomData<ProtoTypes>,
     types: PhantomData<Types>,
-    prins: Arc<RwLock<HashMap<Types::Prin, PartyStreamIdx>>>,
-    reporter: Types::Reporter,
+    prins: Arc<RwLock<HashMap<Types::Prin, MulticastStreamIdx>>>,
+    send: Sender<(MulticastStreamIdx, ProtoTypes::Msg)>,
     notify: Notify,
-    state: Arc<State<IDTypes, Types>>
+}
+
+pub enum RecvMsgError<Msg> {
+    Send {
+        err: SendError<Msg>
+    },
+    Notify {
+        err: Error
+    },
+    MutexPoison
 }
 
 impl<IDTypes, ProtoTypes, Types> Clone
     for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>
-{
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     #[inline]
     fn clone(&self) -> Self {
         ConsensusAuthNRecv {
-            id_types: self.id_types,
+            party_types: self.party_types,
             proto_types: self.proto_types,
             types: self.types,
             prins: self.prins.clone(),
-            reporter: self.reporter.clone(),
             notify: self.notify.clone(),
-            state: self.state.clone()
+            send: self.send.clone()
         }
     }
 }
@@ -78,26 +90,24 @@ where
 impl<IDTypes, ProtoTypes, Types>
     ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>
-{
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     #[inline]
     pub(crate) fn create(
-        reporter: Types::Reporter,
-        state: Arc<State<IDTypes, Types>>,
+        send: Sender<(MulticastStreamIdx, ProtoTypes::Msg)>,
         notify: Notify
     ) -> Self {
         ConsensusAuthNRecv {
-            oper: PhantomData,
-            msg: PhantomData,
-            round_ids: PhantomData,
+            party_types: PhantomData,
+            proto_types: PhantomData,
+            types: PhantomData,
             prins: Arc::new(RwLock::new(HashMap::new())),
-            reporter: reporter,
             notify: notify,
-            state: state
+            send: send
         }
     }
 
@@ -107,7 +117,7 @@ where
         prins: I
     ) -> Result<(), MutexPoison>
     where
-        I: Iterator<Item = (PartyStreamIdx, Types::Prin)> {
+        I: Iterator<Item = (MulticastStreamIdx, Types::Prin)> {
         let mut guard = self.prins.write().map_err(|_| MutexPoison)?;
 
         *guard = prins.map(|(a, b)| (b, a)).collect();
@@ -119,12 +129,12 @@ where
 impl<IDTypes, ProtoTypes, Types> Drop for
     ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>
-{
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     fn drop(&mut self) {
         if let Err(err) = self.notify.notify() {
             error!(target: "consensus-recv-authn-msg",
@@ -135,36 +145,31 @@ where
 }
 
 impl<IDTypes, ProtoTypes, Types>
-    AuthNMsgRecv<Types::Prin, ProtoTypes::Msg, Types::AuthNMsg>
+    AuthNMsgRecv<Types::Prin, Types::AuthNMsg>
     for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>
-{
-    type RecvError = MutexPoison;
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
+    type RecvError = RecvMsgError<(MulticastStreamIdx, ProtoTypes::Msg)>;
 
     /// Receive an authenticated message.
     fn recv_auth_msg(
         &mut self,
         msg: Types::AuthNMsg
     ) -> Result<(), Self::RecvError> {
-        let guard = self.prins.read().map_err(|_| MutexPoison)?;
+        let guard = self.prins.read().map_err(|_| RecvMsgError::MutexPoison)?;
         let (prin, msg) = msg.take();
 
-        match guard.get(prin) {
+        match guard.get(&prin) {
             Some(party) => {
-                if let Err(err) =
-                    self.state.recv(&mut self.reporter, party, msg)
-                {
-                    warn!(target: "consensus-recv-authn-msg",
-                          "error receiving message from {}: {}",
-                          prin, err)
-                }
-
+                self.send.send((party.clone(), msg))
+                    .map_err(|err| RecvMsgError::Send { err: err })?;
                 self.notify.notify()
+                    .map_err(|err| RecvMsgError::Notify { err: err })
             }
             None => {
                 warn!(target: "consensus-recv-authn-msg",
@@ -173,6 +178,19 @@ where
 
                 Ok(())
             }
+        }
+    }
+}
+
+impl<Msg> Display for RecvMsgError<Msg> {
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), std::fmt::Error> {
+        match self {
+            RecvMsgError::Send { err } => write!(f, "{}", err),
+            RecvMsgError::Notify { err } => write!(f, "{}", err),
+            RecvMsgError::MutexPoison => write!(f, "mutex poisoned"),
         }
     }
 }

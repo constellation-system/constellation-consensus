@@ -22,7 +22,6 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
-use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -36,7 +35,6 @@ use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
-use constellation_component_common::PartyStreamIdx;
 use constellation_component_common::bus::dispatch::SessionDispatch;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
@@ -47,6 +45,7 @@ use constellation_streams::large_obj::LargeObjMsgs;
 use constellation_streams::large_obj::LargeObjProtoAddOutboundError;
 use constellation_streams::large_obj::LargeObjProtoCreateError;
 use constellation_streams::large_obj::LargeObjSender;
+use constellation_streams::multicast::MulticastStreamIdx;
 use log::debug;
 use log::trace;
 use log::warn;
@@ -54,16 +53,17 @@ use log::warn;
 use crate::state::State;
 use crate::types::ConsensusPeerTypes;
 use crate::types::ConsensusPeerSessionDispatchTypes;
+use crate::types::ConsensusRecvTypes;
 use crate::types::ConsensusStateTypes;
 
 pub(crate) struct PeerSessionDispatch<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>
-{
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     sessions: Arc<Mutex<HashMap<Types::Prin, PeerSession>>>,
     state: Arc<State<IDTypes, Types>>,
     config: LargeObjProtoConfig<(), (), Types::IDsConfig>
@@ -71,11 +71,12 @@ where
 
 pub(crate) struct PeerSessionRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusStateTypes<IDTypes>
-        + ConsensusPeerTypes<IDTypes, ProtoTypes> {
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     proto_types: PhantomData<ProtoTypes>,
     state: Arc<State<IDTypes, Types>>,
     sessions: Arc<Mutex<HashMap<Types::Prin, PeerSession>>>
@@ -83,11 +84,12 @@ where
 
 pub(crate) struct PeerSessionMsgs<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusStateTypes<IDTypes>
-        + ConsensusPeerTypes<IDTypes, ProtoTypes> {
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     proto_types: PhantomData<ProtoTypes>,
     state: Arc<State<IDTypes, Types>>,
     prin: Types::Prin
@@ -117,14 +119,15 @@ pub(crate) enum PeerSessionRecvError<Prin> {
 impl<IDTypes, ProtoTypes, Types> Clone
     for PeerSessionRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusStateTypes<IDTypes>
-        + ConsensusPeerTypes<IDTypes, ProtoTypes> {
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     fn clone(&self) -> Self {
         PeerSessionRecv {
-            hash: self.hash,
+            proto_types: self.proto_types,
             sessions: self.sessions.clone(),
             state: self.state.clone()
         }
@@ -134,13 +137,15 @@ where
 impl<IDTypes, ProtoTypes, Types> Clone
     for PeerSessionMsgs<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusStateTypes<IDTypes>
-        + ConsensusPeerTypes<IDTypes, ProtoTypes> {
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     fn clone(&self) -> Self {
         PeerSessionMsgs {
+            proto_types: self.proto_types,
             state: self.state.clone(),
             prin: self.prin.clone()
         }
@@ -152,11 +157,12 @@ impl<IDTypes, ProtoTypes, Types>
                                            Types::Seal>>
     for PeerSessionMsgs<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusStateTypes<IDTypes>
-        + ConsensusPeerTypes<IDTypes, ProtoTypes> {
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
@@ -183,7 +189,7 @@ where
 
             sender
                 .add_outbound(&msg)
-                .map_err(|err| WithMutexPoison::Inner { error: err })?;
+                .map_err(|err| WithMutexPoison::Inner { err: err })?;
 
             // XXX the protocol should probably be refactored to send
             // batches.
@@ -203,26 +209,17 @@ impl<Prin> ScopedError for PeerSessionRecvError<Prin> {
     }
 }
 
-impl Drop for PeerSession {
-    fn drop(&mut self) {
-        trace!(target: "peer-session",
-               "signaling local shutdown");
-
-        self.local_shutdown.set()
-    }
-}
-
 impl<IDTypes, ProtoTypes, Types>
     AuthNMsgRecv<Types::PeerPrin,
-                 ConsensusCtl<IDTypes::RoundID, Types::HashID, Types::Seal>,
-                 Types::CtlAuthNMsg>
+                 ConsensusCtl<IDTypes::RoundID, Types::HashID, Types::Seal>>
     for PeerSessionRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusStateTypes<IDTypes>
-        + ConsensusPeerTypes<IDTypes, ProtoTypes> {
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     /// Errors that can occur reporting messages.
     type RecvError = WithMutexPoison<Types::SubmitError>;
 
@@ -255,12 +252,12 @@ where
 
 impl<IDTypes, ProtoTypes, Types> PeerSessionDispatch<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>
-{
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     pub(crate) fn new(
         config: LargeObjProtoConfig<(), (), Types::IDsConfig>,
         state: Arc<State<IDTypes, Types>>
@@ -268,8 +265,6 @@ where
         let sessions = Arc::new(Mutex::new(HashMap::new()));
 
         PeerSessionDispatch {
-            hash: PhantomData,
-            ids: PhantomData,
             sessions: sessions,
             config: config,
             state: state
@@ -280,12 +275,12 @@ where
 impl<IDTypes, ProtoTypes, Types> SessionDispatch<Types::SessionDispTypes>
      for PeerSessionDispatch<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusPeerSessionDispatchTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>
-{
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
+        + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     type SessionError = PeerSessionDispatchError<
         Types::PeerPrin,
         Types::CtlCodecCreateError,
@@ -327,13 +322,13 @@ where
             }
             _ => Err(PeerSessionDispatchError::Exists { prin: prin.clone() })
         }?;
-        let hash = Types::default();
         let recv = PeerSessionRecv {
-            hash: PhantomData,
+            proto_types: PhantomData,
             sessions: self.sessions.clone(),
             state: self.state.clone()
         };
         let msgs = PeerSessionMsgs {
+            proto_types: PhantomData,
             state: self.state.clone(),
             prin: prin
         };
@@ -353,7 +348,7 @@ where
     #[inline]
     fn scope(&self) -> ErrorScope {
         match self {
-            PeerSessionDispatchError::Proto { err } => err.scope,
+            PeerSessionDispatchError::Proto { err } => err.scope(),
             PeerSessionDispatchError::Exists { .. } |
             PeerSessionDispatchError::MutexPoison =>
                 ErrorScope::Unrecoverable,

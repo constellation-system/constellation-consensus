@@ -39,8 +39,6 @@ use constellation_channels::config::ResolverConfig;
 use constellation_channels::far::compound::CompoundFarChannel;
 use constellation_channels::far::compound::CompoundFarChannelSessionCred;
 use constellation_channels::far::compound::CompoundFarChannelXfrm;
-use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
-use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::far::udp::UDPDatagramXfrm;
 use constellation_channels::far::unix::UnixDatagramXfrm;
 use constellation_channels::far::FarChannelAcquiredResolve;
@@ -64,15 +62,13 @@ use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::version::FullVersion;
 use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
-use constellation_component_common::bus::dispatch::DispatchBus;
-use constellation_component_common::bus::dispatch::DispatchBusCleanup;
-use constellation_component_common::bus::multicast::MulticastBus;
-use constellation_component_common::bus::multicast::MulticastBusCleanup;
 use constellation_component_common::config::PartiesConfig;
 use constellation_component_common::config::DispatchLargeObjBusConfig;
+use constellation_component_common::config::MulticastDatagramBusConfig;
+use constellation_component_common::bus::dispatch::DispatchLargeObjBus;
+use constellation_component_common::bus::multicast::MulticastDatagramBus;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
-use constellation_component_common::PartyStreamIdx;
 use constellation_consensus_common::oper::OperBatch;
 use constellation_consensus_common::parties::StaticParties;
 use constellation_consensus_common::proto::ConsensusProto;
@@ -93,6 +89,7 @@ use constellation_streams::channels::ChannelParam;
 use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::error::ErrorReportInfo;
 use constellation_streams::large_obj::LargeObjID;
+use constellation_streams::multicast::MulticastStreamIdx;
 use constellation_streams::stream::StreamID;
 use log::debug;
 use log::error;
@@ -100,8 +97,8 @@ use log::info;
 use log::warn;
 
 use crate::config::ConsensusConfig;
-#[cfg(feature = "standalone")]
-use crate::config::StandaloneConfig;
+//#[cfg(feature = "standalone")]
+//use crate::config::StandaloneConfig;
 use crate::peers::PeerSessionDispatch;
 use crate::recv::ConsensusAuthNRecv;
 use crate::state::State;
@@ -124,26 +121,41 @@ where Types: ConsensusTypes
 {
     round_ids: Types::RoundIDs,
     consensus_config: ConsensusConfig<
-        Types::Party,
         Types::PartyCodecConfig,
-        Types::ConsensusMsgAuthConfig,
-        Types::ConsensusConfig,
-        Types::ConsensusChansConfig,
+//    Proto,
+        Types::Party,
+        Types::ConsensusSessAuthConfig,
+        Types::ConsensusUnixConfig,
+        Types::ConsensusUDPConfig,
+        Types::ConsensusEncoderConfig,
+        Types::ConsensusDecoderConfig,
+        Types::ResolverConfig,
         Types::ConsensusEpochsConfig,
-        Types::Addr
+        Types::ConsensusMsgAuthConfig,
     >,
-    peers_bus_config: DispatchLargeObjBusConfig<Types::PeerChansConfig,
-                                                Types::PeerEpochsConfig,
-                                                Types::PeerMsgAuthConfig>,
+    peers_bus_config: DispatchLargeObjBusConfig<
+        Types::PeerHashConfig,
+        Types::PeerSessionAuthConfig,
+        Types::PeerMsgAuthConfig,
+        Types::PeerProtoAuthConfig,
+        Types::PeerUnixConfig,
+        Types::PeerUDPConfig,
+        (),
+        (),
+        Types::IDsConfig,
+        Types::PeerEpochsConfig
+    >,
     shutdown: ShutdownFlag,
     consensus_ctx: Types::Ctx,
     peers_ctx: Types::Ctx
 }
 
-pub struct ConsensusComponentCleanup {
+pub struct ConsensusComponentCleanup<Types>
+where Types: 'static + ConsensusTypes
+{
     shutdown: ShutdownFlag,
-    multicast: DispatchBusCleanup,
-    peers: DispatchBusCleanup,
+    multicast: MulticastDatagramBus<Types::ConsensusBusTypes, Types::Ctx>,
+    peers: DispatchLargeObjBus<Types::PeerBusTypes, Types::Ctx>,
     state_join: JoinHandle<()>
 }
 
@@ -168,7 +180,7 @@ where Types: ConsensusTypes
 {
     pub fn start(
         self
-    ) -> Result<ConsensusComponentCleanup, ConsensusComponentRunError> {
+    ) -> Result<ConsensusComponentCleanup<Types>, ConsensusComponentRunError> {
         let ConsensusComponent {
             consensus_config,
             peers_bus_config,
@@ -220,8 +232,8 @@ where Types: ConsensusTypes
         let state = Arc::new(state);
         let peer_dispatch =
             PeerSessionDispatch::new(peers_bus_config, state.clone());
-        let peers_comm: DispatchBus<Types::PeerBusTypes> =
-            match DispatchBus::create(
+        let peers_comm: DispatchLargeObjBus<Types::PeerBusTypes, Types::Ctx> =
+            match DispatchLargeObjBus::create(
                 peers_bus_config,
                 peer_dispatch,
                 shutdown.clone(),
@@ -247,8 +259,9 @@ where Types: ConsensusTypes
             state.clone(),
             notify.clone()
         );
-        let multicast: MulticastBus<Types::ConsensusBusTypes, Types::Ctx> =
-            match MulticastBus::create(
+        let multicast: MulticastDatagramBus<Types::ConsensusBusTypes,
+                                            Types::Ctx> =
+            match MulticastDatagramBus::create(
                 Some(self_party.clone()),
                 multicast_config,
                 consensus_ctx,
@@ -268,7 +281,7 @@ where Types: ConsensusTypes
             };
         let party_data = match multicast.parties() {
             Ok(parties) => {
-                let mut parties: Vec<(PartyStreamIdx, Types::Party)> =
+                let mut parties: Vec<(MulticastStreamIdx, Types::Party)> =
                     parties.collect();
 
                 parties.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -333,7 +346,9 @@ where Types: ConsensusTypes
     }
 }
 
-impl ConsensusComponentCleanup {
+impl<Types> ConsensusComponentCleanup<Types>
+where Types: ConsensusTypes
+{
     pub fn cleanup(mut self) {
         self.shutdown.set();
         self.multicast.cleanup();
@@ -374,7 +389,7 @@ impl NSNameCachesCtx for StandaloneCtx {
         &mut self.caches
     }
 }
-
+/*
 // ISSUE #2: AscendingCount is temporary, and will be replaced with a random
 // number stream.
 #[cfg(feature = "standalone")]
@@ -748,3 +763,4 @@ impl Codec<TestSeal> for TestSealCodec {
 }
 
 // ISSUE #2: to here
+*/

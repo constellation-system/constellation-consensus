@@ -21,8 +21,6 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
-use std::hash::Hash;
-use std::marker::PhantomData;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::RecvTimeoutError;
@@ -31,7 +29,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::thread::spawn;
+use std::thread::Builder;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -41,45 +39,62 @@ use constellation_common::net::SharedMsgs;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
 use constellation_component_common::consensus_ctl::ConsensusCtlRound;
-use constellation_component_common::PartyStreamIdx;
 use constellation_consensus_common::oper::OperBatch;
 use constellation_consensus_common::parties::PartyTypes;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
 use constellation_consensus_common::round::RoundMsg;
+use constellation_consensus_common::round::Rounds;
 use constellation_consensus_common::round::RoundsAdvance;
 use constellation_consensus_common::round::RoundsRecv;
 use constellation_consensus_common::round::RoundsSetParties;
+use constellation_consensus_common::round::RoundsSubmit;
 use constellation_consensus_common::round::RoundsUpdate;
-use constellation_consensus_common::state::RoundResultReporter;
+use constellation_streams::multicast::MulticastStreamIdx;
 use log::debug;
 use log::error;
 use log::info;
 use log::trace;
 
+use crate::types::ConsensusRecvTypes;
 use crate::types::ConsensusStateTypes;
+
+pub(crate) struct StateDispatch<IDTypes, Types>
+where
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    Types: ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
+    /// [Sender], which communicates [Receiver]s for outgoing
+    /// [ConsensusCtlRound]s.
+    send: Sender<Receiver<ConsensusCtlRound<IDTypes::RoundID,
+                                            Types::HashID,
+                                            Types::Seal>>>
+}
 
 pub(crate) struct State<IDTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
-    Types: ConsensusStateTypes<IDTypes> {
-    oper: PhantomData<Types::Oper>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    Types: ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     // XXX this may be better off as an mpsc.
     outbound: Mutex<VecDeque<ConsensusCtlRound<IDTypes::RoundID,
                                                Types::HashID,
                                                Types::Seal>>>,
     rounds: Mutex<Types::Rounds>,
+    // Used to notify the sender of a new round.
     notify: Notify
 }
 
 pub(crate) struct StateThread<IDTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
-    Types: ConsensusStateTypes<IDTypes> {
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    Types: ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     state: Arc<State<IDTypes, Types>>,
-    recv: Receiver<(IDTypes::RoundID, Types::Oper)>,
+    round_reqs: Receiver<(IDTypes::RoundID, Types::Oper)>,
     shutdown: ShutdownFlag,
     hash: Types::Hash
 }
@@ -91,10 +106,11 @@ pub(crate) struct StateThreadReporter<RoundID, Oper> {
 #[derive(Clone)]
 pub(crate) struct StateMsgs<IDTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
-    Types: ConsensusStateTypes<IDTypes> {
-    arc: Arc<State<IDTypes, Types>>
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    Types: ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
+    state: Arc<State<IDTypes, Types>>
 }
 
 pub(crate) enum StateInitRoundsError<Parties, Advance> {
@@ -106,62 +122,67 @@ pub(crate) enum StateInitRoundsError<Parties, Advance> {
 impl<IDTypes, Types> From<Arc<State<IDTypes, Types>>>
     for StateMsgs<IDTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
-    Types: ConsensusStateTypes<IDTypes> {
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    Types: ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     #[inline]
     fn from(val: Arc<State<IDTypes, Types>>) -> Self {
-        StateMsgs { arc: val }
+        StateMsgs { state: val }
     }
 }
 
-impl<IDTypes, Types, Msg> SharedMsgs<PartyStreamIdx, Msg>
+impl<IDTypes, Types, Msg> SharedMsgs<MulticastStreamIdx, Msg>
     for StateMsgs<IDTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
     Types: ConsensusStateTypes<IDTypes>,
-    Types::Rounds: SharedMsgs<PartyStreamIdx, Msg>,
+    Types::Rounds: SharedMsgs<MulticastStreamIdx, Msg>,
+    Types::Hash: Send,
     Msg: RoundMsg<IDTypes::RoundID> {
     type MsgsError = WithMutexPoison<
-        <Types::Rounds as SharedMsgs<PartyStreamIdx, Msg>>::MsgsError
+        <Types::Rounds as SharedMsgs<MulticastStreamIdx, Msg>>::MsgsError
     >;
 
     fn msgs(
         &mut self,
-        live: &HashSet<PartyStreamIdx>,
+        live: &HashSet<MulticastStreamIdx>,
         now: Instant
     ) -> Result<
         (
-            Option<Vec<(Vec<PartyStreamIdx>, Vec<Msg>)>>,
+            Option<Vec<(Vec<MulticastStreamIdx>, Vec<Msg>)>>,
             Option<Instant>
         ),
         Self::MsgsError
     > {
-        self.arc
+        self.state
             .rounds
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
-            .msgs()
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .msgs(live, now)
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
 impl<IDTypes, Types> State<IDTypes, Types>
 where
-    IDTypes: PartyTypes + RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
-    Types: ConsensusStateTypes<IDTypes> {
+    IDTypes: PartyTypes + RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    Types: ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     #[inline]
-    pub(crate) fn new(rounds: Types::Rounds) -> Self {
+    pub(crate) fn new(
+        rounds: Types::Rounds,
+        notify: Notify
+    ) -> Self {
         let outbound = VecDeque::new();
 
         // XXX use size hints.
         State {
-            oper: PhantomData,
             rounds: Mutex::new(rounds),
             outbound: Mutex::new(outbound),
-            notify: Notify::new()
+            notify: notify
         }
     }
 
@@ -194,29 +215,25 @@ where
         Ok(())
     }
 
-    pub(crate) fn recv<ProtoTypes, Reporter>(
+    pub(crate) fn recv<ProtoTypes>(
         &self,
-        reporter: &mut Reporter,
-        party: &PartyStreamIdx,
+        party: &MulticastStreamIdx,
         msg: ProtoTypes::Msg
     ) -> Result<
         (),
         WithMutexPoison<
             <Types::Rounds as RoundsRecv<IDTypes, ProtoTypes,
-                                         Types::Oper>>::RecvError<
-                Reporter::ReportError
-            >
+                                         Types::Oper>>::RecvError
         >
     >
     where
         ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-        Types::Rounds: RoundsRecv<IDTypes, ProtoTypes, Types::Oper>,
-        Reporter: RoundResultReporter<IDTypes::RoundID, Types::Oper> {
+        Types::Rounds: RoundsRecv<IDTypes, ProtoTypes, Types::Oper> {
         self.rounds
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .recv(reporter, party, msg)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 
     #[inline]
@@ -247,8 +264,8 @@ where
         self.rounds
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
-            .submit_elems(hashes.into_iter())
-            .map_err(|err| WithMutexPoison::Inner { error: err })?;
+            .submit_reqs(hashes.into_iter())
+            .map_err(|err| WithMutexPoison::Inner { err: err })?;
         self.notify
             .notify()
             .map_err(|_| WithMutexPoison::MutexPoison)
@@ -258,18 +275,55 @@ where
         &self,
         round: IDTypes::RoundID,
         hashes: Vec<Types::HashID>
-    ) -> Result<(), MutexPoison> {
+    ) -> Result<(), WithMutexPoison<std::io::Error>> {
         debug!(target: "consensus-component-state",
                "adding round {} to outbound queue",
                round);
 
         self.outbound
             .lock()
-            .map_err(|_| MutexPoison)?
+            .map_err(|_| WithMutexPoison::MutexPoison)?
             .push_back(ConsensusCtlRound::new(round, hashes, None));
-        self.notify.notify()?;
+        self.notify.notify()
+            .map_err(|err| WithMutexPoison::Inner { err: err })?;
 
         Ok(())
+    }
+
+    fn advance_round(
+        &self,
+        mut rounds: MutexGuard<'_, Types::Rounds>,
+    ) -> (bool, Option<Instant>) {
+        match rounds.advance() {
+            Ok(Some((_, deadline))) => {
+                // Notify the bus for new messages.
+
+                if let Err(err) = self.notify.notify() {
+                    error!(target: "consensus-component-state-thread",
+                           "error notifying sender: {}",
+                           err);
+                }
+
+                (true, deadline)
+            }
+            // XXX this will go away
+            Ok(None) => {
+                if let Err(err) = self.notify.notify() {
+                    error!(target: "consensus-component-state-thread",
+                           "error notifying sender: {}",
+                           err);
+                }
+
+                (true, None)
+            }
+            Err(err) => {
+                error!(target: "consensus-component-state-thread",
+                       "error advancing to next round: {}",
+                       err);
+
+                (false, None)
+            }
+        }
     }
 }
 
@@ -284,9 +338,10 @@ impl<RoundID, Oper> Clone for StateThreadReporter<RoundID, Oper> {
 
 impl<IDTypes, Types> StateThread<IDTypes, Types>
 where
-    IDTypes: PartyTypes + RoundPartyIDTypes<PartyID = PartyStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128>,
-    Types: ConsensusStateTypes<IDTypes> {
+    IDTypes: 'static + PartyTypes + RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    Types: 'static + ConsensusStateTypes<IDTypes>,
+    Types::Hash: Send {
     pub(crate) fn create(
         state: Arc<State<IDTypes, Types>>,
         shutdown: ShutdownFlag,
@@ -305,44 +360,8 @@ where
         )
     }
 
-    fn advance_round(
-        &mut self,
-        rounds: MutexGuard<'_, Types::Rounds>,
-        round: IDTypes::RoundID,
-        oper: Types::Oper
-    ) -> (bool, Option<Instant>) {
-        match rounds.advance() {
-            Ok(Some((_, deadline))) => {
-                if let Err(err) = self.state.notify().notify() {
-                    error!(target: "consensus-component-state-thread",
-                   "error notifying sender: {}",
-                   err);
-                }
-
-                (true, deadline)
-            }
-            // XXX this will go away
-            Ok(None) => {
-                if let Err(err) = self.state.notify().notify() {
-                    error!(target: "consensus-component-state-thread",
-                   "error notifying sender: {}",
-                   err);
-                }
-
-                (true, None)
-            }
-            Err(err) => {
-                error!(target: "consensus-component-state-thread",
-               "error advancing to next round: {}",
-               err);
-
-                (false, None)
-            }
-        }
-    }
-
     fn process_new_batch(
-        &mut self,
+        &self,
         rounds: MutexGuard<'_, Types::Rounds>,
         round: IDTypes::RoundID,
         oper: Types::Oper
@@ -357,10 +376,10 @@ where
 
                     (false, None)
                 } else {
-                    self.advance_round(rounds, round, oper)
+                    self.state.advance_round(rounds)
                 }
             }
-            Ok(None) => self.advance_round(rounds, round, oper),
+            Ok(None) => self.state.advance_round(rounds),
             Err(err) => {
                 error!(target: "consensus-component-state-thread",
                    "error getting hashes for batch: {}",
@@ -492,25 +511,10 @@ where
                "state thread exiting")
     }
 
-    pub(crate) fn start(self) -> JoinHandle<()> {
-        spawn(move || self.run())
-    }
-}
-
-impl<RoundID, Oper> RoundResultReporter<RoundID, Oper>
-    for StateThreadReporter<RoundID, Oper>
-where
-    RoundID: Send,
-    Oper: Send + Sync
-{
-    type ReportError = SendError<(RoundID, Oper)>;
-
-    fn report(
-        &self,
-        round: RoundID,
-        oper: Oper
-    ) -> Result<(), Self::ReportError> {
-        self.send.send((round, oper))
+    pub(crate) fn start(self) -> Result<JoinHandle<()>, std::io::Error> {
+        Builder::new()
+            .name(String::from("consensus-state-thread"))
+            .spawn(move || self.run())
     }
 }
 

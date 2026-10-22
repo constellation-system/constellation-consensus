@@ -29,6 +29,7 @@ use constellation_common::codec::Decoder;
 use constellation_common::codec::Encoder;
 #[cfg(feature = "standalone")]
 use constellation_common::ids::AscendingCount;
+use constellation_component_common::config::DispatchLargeObjBusConfig;
 use constellation_component_common::config::MulticastDatagramBusConfig;
 #[cfg(feature = "standalone")]
 use constellation_pbft::config::PBFTConfig;
@@ -40,142 +41,202 @@ use constellation_streams::config::LargeObjProtoConfig;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "consensus-component")]
 #[serde(rename_all = "kebab-case")]
 pub struct ConsensusComponentConfig<
-    PartyID,
     PartyCodec,
-    Proto,
-    Channel,
-    Flows,
-    Channels,
-    Epochs,
-    LargeObj,
-    AuthN,
-    Xfrm,
-    Endpoint
+//    Proto,
+    PartyID,
+    ConsensusAuthN,
+    ConsensusUnix,
+    ConsensusUDP,
+    ConsensusEnc,
+    ConsensusDec,
+    ConsensusResolver,
+    ConsensusEpochs,
+    ConsensusMsgAuthN,
+    PeerHash,
+    PeerSessAuth,
+    PeerMsgAuth,
+    PeerProtoAuth,
+    PeerUnix,
+    PeerUDP,
+    PeerIDs,
+    PeerEpochs
 > where
     PartyCodec: Default,
-    Channels: Default,
-    Proto: Default,
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default {
+//    Proto: Default,
+    ConsensusResolver: Default,
+    ConsensusEpochs: Default,
+    ConsensusUnix: Default,
+    ConsensusUDP: Default,
+    ConsensusEnc: Default,
+    ConsensusDec: Default,
+    PeerHash: Default,
+    PeerUnix: Default,
+    PeerUDP: Default,
+    PeerIDs: Default,
+    PeerEpochs: Default {
     /// Channel registry configuration.
     #[serde(flatten)]
-    consensus_registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
-    #[serde(flatten)]
-    consensus:
-        ConsensusConfig<PartyID, PartyCodec, AuthN,
-                        Proto, Channels, Epochs, Endpoint>,
-    peers: PeersConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+    consensus: ConsensusConfig<
+        PartyCodec,
+//        Proto,
+        PartyID,
+        ConsensusAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusEnc,
+        ConsensusDec,
+        ConsensusResolver,
+        ConsensusEpochs,
+        ConsensusMsgAuthN,
+    >,
+    peers: DispatchLargeObjBusConfig<
+        PeerHash,
+        PeerSessAuth,
+        PeerMsgAuth,
+        PeerProtoAuth,
+        PeerUnix,
+        PeerUDP,
+        (),
+        (),
+        PeerIDs,
+        PeerEpochs
+    >
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "consensus-pool")]
 #[serde(rename_all = "kebab-case")]
 pub struct ConsensusConfig<
-    PartyID,
     PartyCodec,
+//    Proto,
+    PartyID,
     AuthN,
-    Proto,
-    Channels,
+    Unix,
+    UDP,
+    Enc,
+    Dec,
+    Resolver,
     Epochs,
-    Endpoint
+    MsgAuthN,
 > where
     PartyCodec: Default,
-    Channels: Default,
-    Proto: Default,
-    Epochs: Default {
-    #[serde(default)]
-    proto: Proto,
-    /// Party identitfying this node.
-    #[serde(rename = "self")]
-    self_party: PartyID,
+    Resolver: Default,
+//    Proto: Default,
+    Epochs: Default,
+    Unix: Default,
+    UDP: Default,
+    Enc: Default,
+    Dec: Default {
+//    #[serde(default)]
+//    proto: Proto,
     #[serde(default)]
     party_codec: PartyCodec,
     #[serde(flatten)]
-    multicast: MulticastDatagramBusConfig<Channels, Epochs, PartyID,
-                                          AuthN, Endpoint>
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
-#[serde(rename = "peers")]
-#[serde(rename_all = "kebab-case")]
-pub struct PeersConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
-where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default {
-    /// Channel registry configuration.
-    #[serde(flatten)]
-    registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
-    /// Configuration for the dispatch comm subsystem.
-    #[serde(default)]
-    #[serde(flatten)]
-    bus: DispatchLargeObjBusConfig<Epochs>,
-    #[serde(default)]
-    large_obj: LargeObj,
-    authn: AuthN
+    multicast: MulticastDatagramBusConfig<
+        PartyID,
+        AuthN,
+        Unix,
+        UDP,
+        Enc,
+        Dec,
+        Resolver,
+        Epochs,
+        MsgAuthN
+    >
 }
 
 impl<
-        PartyID,
-        PartyCodec,
-        Proto,
-        Channel,
-        Flows,
-        Channels,
-        Epochs,
-        LargeObj,
-        AuthN,
-        Xfrm,
-        Endpoint
-    >
-    ConsensusComponentConfig<
-        PartyID,
-        PartyCodec,
-        Proto,
-        Channel,
-        Flows,
-        Channels,
-        Epochs,
-        LargeObj,
-        AuthN,
-        Xfrm,
-        Endpoint
-    >
-where
+    PartyCodec,
+//    Proto,
+    PartyID,
+    ConsensusAuthN,
+    ConsensusUnix,
+    ConsensusUDP,
+    ConsensusEnc,
+    ConsensusDec,
+    ConsensusResolver,
+    ConsensusEpochs,
+    ConsensusMsgAuthN,
+    PeerHash,
+    PeerSessAuth,
+    PeerMsgAuth,
+    PeerProtoAuth,
+    PeerUnix,
+    PeerUDP,
+    PeerIDs,
+    PeerEpochs
+> ConsensusComponentConfig<
+    PartyCodec,
+//    Proto,
+    PartyID,
+    ConsensusAuthN,
+    ConsensusUnix,
+    ConsensusUDP,
+    ConsensusEnc,
+    ConsensusDec,
+    ConsensusResolver,
+    ConsensusEpochs,
+    ConsensusMsgAuthN,
+    PeerHash,
+    PeerSessAuth,
+    PeerMsgAuth,
+    PeerProtoAuth,
+    PeerUnix,
+    PeerUDP,
+    PeerIDs,
+    PeerEpochs
+> where
     PartyCodec: Default,
-    Channels: Default,
-    Proto: Default,
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default
-{
+//    Proto: Default,
+    ConsensusResolver: Default,
+    ConsensusEpochs: Default,
+    ConsensusUnix: Default,
+    ConsensusUDP: Default,
+    ConsensusEnc: Default,
+    ConsensusDec: Default,
+    PeerHash: Default,
+    PeerUnix: Default,
+    PeerUDP: Default,
+    PeerIDs: Default,
+    PeerEpochs: Default {
     #[inline]
     pub fn consensus(
         &self
-    ) -> &ConsensusConfig<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>
-    {
+    ) -> &ConsensusConfig<
+        PartyCodec,
+//        Proto,
+        PartyID,
+        ConsensusAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusEnc,
+        ConsensusDec,
+        ConsensusResolver,
+        ConsensusEpochs,
+        ConsensusMsgAuthN,
+    > {
         &self.consensus
-    }
-
-    #[inline]
-    pub fn consensus_registry(
-        &self
-    ) -> &ChannelRegistryConfig<Channel, Flows, Xfrm> {
-        &self.consensus_registry
     }
 
     #[inline]
     pub fn peers(
         &self
-    ) -> &PeersConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm> {
+    ) -> &DispatchLargeObjBusConfig<
+        PeerHash,
+        PeerSessAuth,
+        PeerMsgAuth,
+        PeerProtoAuth,
+        PeerUnix,
+        PeerUDP,
+        (),
+        (),
+        PeerIDs,
+        PeerEpochs
+    > {
         &self.peers
     }
 
@@ -183,122 +244,119 @@ where
     pub fn take(
         self
     ) -> (
-        ConsensusConfig<PartyID, PartyCodec, Proto, Channels, Epochs, Endpoint>,
-        ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        PeersConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+        ConsensusConfig<
+            PartyCodec,
+//            Proto,
+            PartyID,
+            ConsensusAuthN,
+            ConsensusUnix,
+            ConsensusUDP,
+            ConsensusEnc,
+            ConsensusDec,
+            ConsensusResolver,
+            ConsensusEpochs,
+            ConsensusMsgAuthN,
+        >,
+        DispatchLargeObjBusConfig<
+            PeerHash,
+            PeerSessAuth,
+            PeerMsgAuth,
+            PeerProtoAuth,
+            PeerUnix,
+            PeerUDP,
+            (),
+            (),
+            PeerIDs,
+            PeerEpochs
+        >
     ) {
-        (self.consensus, self.consensus_registry, self.peers)
+        (self.consensus, self.peers)
     }
 }
 
-impl<PartyID, PartyCodec, AuthN, Proto, Channels, Epochs, Endpoint>
-    ConsensusConfig<PartyID, PartyCodec, AuthN, Proto,
-                    Channels, Epochs, Endpoint>
-where
+impl<
+    PartyCodec,
+//    Proto,
+    PartyID,
+    AuthN,
+    Unix,
+    UDP,
+    Enc,
+    Dec,
+    Resolver,
+    Epochs,
+    MsgAuthN,
+> ConsensusConfig<
+    PartyCodec,
+//    Proto,
+    PartyID,
+    AuthN,
+    Unix,
+    UDP,
+    Enc,
+    Dec,
+    Resolver,
+    Epochs,
+    MsgAuthN,
+> where
     PartyCodec: Default,
-    Channels: Default,
-    Proto: Default,
-    Epochs: Default
-{
+    Resolver: Default,
+//    Proto: Default,
+    Epochs: Default,
+    Unix: Default,
+    UDP: Default,
+    Enc: Default,
+    Dec: Default {
     #[inline]
     pub fn multicast(
         &self
-    ) -> &MulticastDatagramBusConfig<Channels, Epochs, PartyID,
-                                     AuthN, Endpoint> {
+    ) -> &MulticastDatagramBusConfig<
+        PartyID,
+        AuthN,
+        Unix,
+        UDP,
+        Enc,
+        Dec,
+        Resolver,
+        Epochs,
+        MsgAuthN
+    > {
         &self.multicast
-    }
-
-    #[inline]
-    pub fn self_party(&self) -> &PartyID {
-        &self.self_party
     }
 
     #[inline]
     pub fn party_codec(&self) -> &PartyCodec {
         &self.party_codec
     }
-
+/*
     #[inline]
     pub fn proto(&self) -> &Proto {
         &self.proto
     }
-
+*/
     #[inline]
     pub fn take(
         self
     ) -> (
-        Proto,
-        PartyID,
+//        Proto,
         PartyCodec,
-        MulticastDatagramBusConfig<Channels, Epochs, PartyID,
-                                   AuthN, Endpoint>
+        MulticastDatagramBusConfig<
+            PartyID,
+            AuthN,
+            Unix,
+            UDP,
+            Enc,
+            Dec,
+            Resolver,
+            Epochs,
+            MsgAuthN
+        >
     ) {
-        (self.proto, self.self_party, self.party_codec, self.multicast)
+        (/*self.proto,*/ self.party_codec, self.multicast)
     }
 }
 
-impl<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
-    PeersConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
-where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default
-{
-    #[inline]
-    pub fn new(
-        registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        bus: DispatchLargeObjBusConfig<Epochs>,
-        large_obj: LargeObj,
-        authn: AuthN
-    ) -> Self {
-        PeersConfig {
-            large_obj: large_obj,
-            registry: registry,
-            authn: authn,
-            bus: bus
-        }
-    }
-
-    #[inline]
-    pub fn registry(&self) -> &ChannelRegistryConfig<Channel, Flows, Xfrm> {
-        &self.registry
-    }
-
-    #[inline]
-    pub fn bus(&self) -> &DispatchLargeObjBusConfig<Epochs> {
-        &self.bus
-    }
-
-    #[inline]
-    pub fn authn(&self) -> &AuthN {
-        &self.authn
-    }
-
-    #[inline]
-    pub fn large_obj(&self) -> &LargeObj {
-        &self.large_obj
-    }
-
-    #[inline]
-    pub fn take(
-        self
-    ) -> (
-        ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        DispatchLargeObjBusConfig<Epochs>,
-        LargeObj,
-        AuthN
-    ) {
-        (self.registry, self.bus, self.large_obj, self.authn)
-    }
-}
-
-pub type RegistryConfig = ChannelRegistryConfig<
-    CompoundFarChannelConfig,
-    ThreadedFlowsParams,
-    CompoundXfrmCreateParam<(), ()>
->;
-
+/*
 /// Top-level master configuration object.
 ///
 /// Most configuration objects should be contained in
@@ -493,3 +551,4 @@ impl StandaloneConfig {
 //
 // assert_eq!(expected, actual);
 // }
+*/
