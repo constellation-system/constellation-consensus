@@ -56,7 +56,7 @@ pub trait ConsensusBaseTypes {
     type HashID: Clone + Display + Hash + HashID + Eq + Send;
     type Hash: Clone + HashAlgo<HashID = Self::HashID> + Send;
     type Oper: OperBatch<Self::Hash> + Send;
-    type Seal: Send;
+    type Seal: Clone + Send;
     type SealCodec: Clone + Decoder<Self::Seal> + Encoder<Self::Seal>
         + CreateWithParam<Self::SealCodecParam>;
     type SealCodecParam: Clone + Default;
@@ -108,12 +108,16 @@ where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128>,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> {
-    type PeerPrin: Debug + Display + Eq + Hash + Send;
+    type PeerPrin: Clone + Debug + Display + Eq + Hash + Send + Sync;
     type IDsCreateError: Debug + Display + ScopedError;
     type IDsConfig: Clone + Default;
     type IDs: Create<Config = Self::IDsConfig>
         + Iterator<Item = LargeObjID> + Send;
-    type CtlAuthNMsg: AuthNed<Self::PeerPrin>;
+    type CtlAuthNMsg: AuthNed<Self::PeerPrin>
+        + AuthNedDestruct<
+            Self::Prin,
+            ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>
+        >;
     type CtlCodecCreateError: Debug + Display + ScopedError;
     type CtlCodec: Clone + Create<CreateError = Self::CtlCodecCreateError>
         + Decoder<ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>>
