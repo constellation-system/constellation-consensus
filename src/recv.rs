@@ -17,6 +17,7 @@
 // <https://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::io::Error;
@@ -28,7 +29,9 @@ use std::sync::mpsc::SendError;
 
 use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
+use constellation_common::error::ErrorScope;
 use constellation_common::error::MutexPoison;
+use constellation_common::error::ScopedError;
 use constellation_common::sync::Notify;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
@@ -55,6 +58,7 @@ where
     notify: Notify,
 }
 
+#[derive(Debug)]
 pub enum RecvMsgError<Msg> {
     Send {
         err: SendError<Msg>
@@ -151,6 +155,7 @@ where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Debug,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
         + ConsensusStateTypes<IDTypes>,
     Types::Hash: Send {
@@ -178,6 +183,16 @@ where
 
                 Ok(())
             }
+        }
+    }
+}
+
+impl<Msg> ScopedError for RecvMsgError<Msg> {
+    fn scope(&self) -> ErrorScope {
+        match self {
+            RecvMsgError::Send { err } => err.scope(),
+            RecvMsgError::Notify { err } => err.scope(),
+            RecvMsgError::MutexPoison => ErrorScope::Unrecoverable
         }
     }
 }

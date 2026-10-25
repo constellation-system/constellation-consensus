@@ -41,6 +41,7 @@ use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
 use constellation_component_common::bus::dispatch::SessionDispatch;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
+use constellation_component_common::consensus_ctl::ConsensusCtlRound;
 use constellation_component_common::bus::types::SessionDispatchTypes;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
@@ -71,6 +72,7 @@ where
     sessions: Arc<Mutex<HashMap<Types::PeerPrin, PeerSession>>>,
     state: PeerSessionState<IDTypes, ProtoTypes, Types>,
     send: Sender<Vec<Types::HashID>>,
+    state_notify: Notify,
 }
 
 pub(crate) struct PeerSessionRecv<IDTypes, ProtoTypes, Types>
@@ -85,6 +87,7 @@ where
     id_types: PhantomData<IDTypes>,
     proto_types: PhantomData<ProtoTypes>,
     send: Sender<Vec<Types::HashID>>,
+    notify: Notify
 }
 
 struct PeerSessionMsgState<IDTypes, ProtoTypes, Types>
@@ -99,7 +102,7 @@ where
     msg: ConsensusCtl<IDTypes::RoundID, Types::HashID, Types::Seal>
 }
 
-struct PeerSessionState<IDTypes, ProtoTypes, Types>
+pub(crate) struct PeerSessionState<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
@@ -154,9 +157,13 @@ pub(crate) enum PeerSessionDispatchError<Prin, Encoder, Decoder, IDs> {
 }
 
 #[derive(Debug)]
-pub(crate) enum PeerSessionRecvError<Prin> {
-    NotFound { prin: Prin },
-    MutexPoison
+pub(crate) enum PeerSessionRecvError<HashID> {
+    Send {
+        err: SendError<Vec<HashID>>
+    },
+    IO {
+        err: std::io::Error
+    },
 }
 
 #[derive(Debug)]
@@ -231,25 +238,25 @@ where
         Ok(())
     }
 
-    fn add_outbound(
+    pub(crate) fn add_outbound(
         &self,
-        msg: ConsensusCtl<IDTypes::RoundID, Types::HashID, Types::Seal>
-    ) -> Result<(), WithMutexPoison<std::io::Error>> {
+        msg: ConsensusCtlRound<IDTypes::RoundID, Types::HashID, Types::Seal>
+    ) -> Result<(), MutexPoison> {
         let peers = self
             .peers
             .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?
+            .map_err(|_| MutexPoison)?
             .iter()
             .cloned()
             .collect();
         let pending = PeerSessionMsgState {
             pending: peers,
-            msg: msg
+            msg: ConsensusCtl::Round(msg)
         };
 
         self.pending
             .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?
+            .map_err(|_| MutexPoison)?
             .push(pending);
 
         Ok(())
@@ -315,7 +322,8 @@ where
         PeerSessionRecv {
             id_types: self.id_types,
             proto_types: self.proto_types,
-            send: self.send.clone()
+            notify: self.notify.clone(),
+            send: self.send.clone(),
         }
     }
 }
@@ -401,7 +409,7 @@ where
         + ConsensusStateTypes<IDTypes>,
     Types::Hash: Send {
     /// Errors that can occur reporting messages.
-    type RecvError = SendError<Vec<Types::HashID>>;
+    type RecvError = PeerSessionRecvError<Types::HashID>;
 
     /// Receive an authenticated message.
     fn recv_auth_msg(
@@ -421,7 +429,14 @@ where
 
                 Ok(())
             }
-            ConsensusCtl::Submit(submit) => self.send.send(submit.take())
+            ConsensusCtl::Submit(submit) => {
+                self.send.send(submit.take())
+                    .map_err(|err| PeerSessionRecvError::Send { err: err })?;
+                self.notify.notify()
+                    .map_err(|err| PeerSessionRecvError::IO { err: err })?;
+
+                Ok(())
+            }
         }
     }
 }
@@ -438,6 +453,7 @@ where
     pub(crate) fn new(
         config: LargeObjProtoConfig<(), (), Types::IDsConfig>,
         send: Sender<Vec<Types::HashID>>,
+        state_notify: Notify,
         npeers_hint: Option<usize>,
         npending_hint: Option<usize>
     ) -> Self {
@@ -458,6 +474,7 @@ where
         let sessions = Arc::new(Mutex::new(HashMap::new()));
 
         PeerSessionDispatch {
+            state_notify: state_notify,
             sessions: sessions,
             config: config,
             state: state,
@@ -536,7 +553,8 @@ where
         let recv = PeerSessionRecv {
             id_types: PhantomData,
             proto_types: PhantomData,
-            send: self.send.clone()
+            send: self.send.clone(),
+            notify: self.state_notify.clone()
         };
 
         self.state.add_peer(peer.clone(), notify);
@@ -551,11 +569,11 @@ where
     }
 }
 
-impl<Prin> ScopedError for PeerSessionRecvError<Prin> {
+impl<HashID> ScopedError for PeerSessionRecvError<HashID> {
     fn scope(&self) -> ErrorScope {
         match self {
-            PeerSessionRecvError::NotFound { .. } => ErrorScope::Session,
-            PeerSessionRecvError::MutexPoison => ErrorScope::Unrecoverable
+            PeerSessionRecvError::Send { err } => err.scope(),
+            PeerSessionRecvError::IO { err } => err.scope(),
         }
     }
 }
@@ -613,9 +631,9 @@ where
     }
 }
 
-impl<Prin> Display for PeerSessionRecvError<Prin>
+impl<HashID> Display for PeerSessionRecvError<HashID>
 where
-    Prin: Display
+    HashID: Display
 {
     #[inline]
     fn fmt(
@@ -623,12 +641,8 @@ where
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            PeerSessionRecvError::NotFound { prin } => {
-                write!(f, "no processor session exists for {}", prin)
-            }
-            PeerSessionRecvError::MutexPoison => {
-                write!(f, "mutex poisoned")
-            }
+            PeerSessionRecvError::Send { err } => write!(f, "{}", err),
+            PeerSessionRecvError::IO { err } => write!(f, "{}", err),
         }
     }
 }

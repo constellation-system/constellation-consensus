@@ -53,9 +53,13 @@ use crate::peers::PeerSessionMsgs;
 use crate::peers::PeerSessionRecv;
 
 pub trait ConsensusBaseTypes {
-    type HashID: Clone + Display + Hash + HashID + Eq + Send;
+    type HashID: Clone + Debug + Display + Hash + HashID + Eq + Send;
     type Hash: Clone + HashAlgo<HashID = Self::HashID> + Send;
-    type Oper: OperBatch<Self::Hash> + Send;
+    type BatchError: Debug + Display;
+    type Oper: OperBatch<
+            Self::Hash,
+            BatchError = Self::BatchError
+        > + Send;
     type Seal: Clone + Send;
     type SealCodec: Clone + Decoder<Self::Seal> + Encoder<Self::Seal>
         + CreateWithParam<Self::SealCodecParam>;
@@ -77,11 +81,14 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> {
     type SubmitError: Debug + Display + ScopedError;
     type AdvanceError: Debug + Display;
+    type UpdateError: Debug + Display;
     type Rounds: RoundsAdvance<
         IDTypes::RoundID,
         AdvanceError = Self::AdvanceError
-    > + RoundsUpdate<Self::Oper>
-        + RoundsSubmit<Self::HashID, SubmitError = Self::SubmitError>
+    > + RoundsUpdate<
+        Self::Oper,
+        UpdateError = Self::UpdateError
+    > + RoundsSubmit<Self::HashID, SubmitError = Self::SubmitError>
         + Send;
 }
 

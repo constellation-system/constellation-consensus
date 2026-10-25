@@ -85,6 +85,7 @@ constellation-pbft = { git = "https://github.com/constellation-system/constellat
 constellation-standalone = { git = "https://github.com/constellation-system/constellation-standalone.git", branch = "project/ioc", default-features = false, optional = true }
 constellation-streams = { git = "https://github.com/constellation-system/constellation-streams.git", branch = "project/ioc", default-features = false }
 log = { version = "0.4", optional = true }
+mio = { version = "1.0" }
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
