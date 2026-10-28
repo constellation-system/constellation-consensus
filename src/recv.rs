@@ -40,15 +40,13 @@ use log::error;
 use log::warn;
 
 use crate::types::ConsensusRecvTypes;
-use crate::types::ConsensusStateTypes;
 
 pub(crate) struct ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     party_types: PhantomData<IDTypes>,
     proto_types: PhantomData<ProtoTypes>,
@@ -75,8 +73,7 @@ where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     #[inline]
     fn clone(&self) -> Self {
@@ -97,8 +94,7 @@ where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     #[inline]
     pub(crate) fn create(
@@ -136,8 +132,7 @@ where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     fn drop(&mut self) {
         if let Err(err) = self.notify.notify() {
@@ -156,8 +151,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Debug,
-    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     type RecvError = RecvMsgError<(MulticastStreamIdx, ProtoTypes::Msg)>;
 

@@ -45,9 +45,11 @@ use serde::Serialize;
 #[serde(rename = "consensus-component")]
 #[serde(rename_all = "kebab-case")]
 pub struct ConsensusComponentConfig<
-    PartyCodec,
-//    Proto,
+    RoundIDs,
+    Proto,
     PartyID,
+    Hash,
+    IDs,
     ConsensusAuthN,
     ConsensusUnix,
     ConsensusUDP,
@@ -65,8 +67,10 @@ pub struct ConsensusComponentConfig<
     PeerIDs,
     PeerEpochs
 > where
-    PartyCodec: Default,
-//    Proto: Default,
+    RoundIDs: Default,
+    Proto: Default,
+    Hash: Default,
+    IDs: Default,
     ConsensusResolver: Default,
     ConsensusEpochs: Default,
     ConsensusUnix: Default,
@@ -79,10 +83,16 @@ pub struct ConsensusComponentConfig<
     PeerIDs: Default,
     PeerEpochs: Default {
     /// Channel registry configuration.
+    #[serde(default)]
+    round_ids: RoundIDs,
+    #[serde(default)]
+    large_obj: LargeObjProtoConfig<(), (), IDs>,
+    #[serde(default)]
+    hash: Hash,
+    #[serde(default)]
+    proto: Proto,
     #[serde(flatten)]
-    consensus: ConsensusConfig<
-        PartyCodec,
-//        Proto,
+    multicast: MulticastDatagramBusConfig<
         PartyID,
         ConsensusAuthN,
         ConsensusUnix,
@@ -107,52 +117,12 @@ pub struct ConsensusComponentConfig<
     >
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename = "consensus-pool")]
-#[serde(rename_all = "kebab-case")]
-pub struct ConsensusConfig<
-    PartyCodec,
-//    Proto,
-    PartyID,
-    AuthN,
-    Unix,
-    UDP,
-    Enc,
-    Dec,
-    Resolver,
-    Epochs,
-    MsgAuthN,
-> where
-    PartyCodec: Default,
-    Resolver: Default,
-//    Proto: Default,
-    Epochs: Default,
-    Unix: Default,
-    UDP: Default,
-    Enc: Default,
-    Dec: Default {
-//    #[serde(default)]
-//    proto: Proto,
-    #[serde(default)]
-    party_codec: PartyCodec,
-    #[serde(flatten)]
-    multicast: MulticastDatagramBusConfig<
-        PartyID,
-        AuthN,
-        Unix,
-        UDP,
-        Enc,
-        Dec,
-        Resolver,
-        Epochs,
-        MsgAuthN
-    >
-}
-
 impl<
-    PartyCodec,
-//    Proto,
+    RoundIDs,
+    Proto,
     PartyID,
+    Hash,
+    IDs,
     ConsensusAuthN,
     ConsensusUnix,
     ConsensusUDP,
@@ -170,9 +140,11 @@ impl<
     PeerIDs,
     PeerEpochs
 > ConsensusComponentConfig<
-    PartyCodec,
-//    Proto,
+    RoundIDs,
+    Proto,
     PartyID,
+    Hash,
+    IDs,
     ConsensusAuthN,
     ConsensusUnix,
     ConsensusUDP,
@@ -190,8 +162,10 @@ impl<
     PeerIDs,
     PeerEpochs
 > where
-    PartyCodec: Default,
-//    Proto: Default,
+    RoundIDs: Default,
+    Proto: Default,
+    Hash: Default,
+    IDs: Default,
     ConsensusResolver: Default,
     ConsensusEpochs: Default,
     ConsensusUnix: Default,
@@ -204,11 +178,9 @@ impl<
     PeerIDs: Default,
     PeerEpochs: Default {
     #[inline]
-    pub fn consensus(
+    pub fn multicast(
         &self
-    ) -> &ConsensusConfig<
-        PartyCodec,
-//        Proto,
+    ) -> &MulticastDatagramBusConfig<
         PartyID,
         ConsensusAuthN,
         ConsensusUnix,
@@ -219,7 +191,27 @@ impl<
         ConsensusEpochs,
         ConsensusMsgAuthN,
     > {
-        &self.consensus
+        &self.multicast
+    }
+
+    #[inline]
+    pub fn large_obj(&self) -> &LargeObjProtoConfig<(), (), IDs> {
+        &self.large_obj
+    }
+
+    #[inline]
+    pub fn round_ids(&self) -> &RoundIDs {
+        &self.round_ids
+    }
+
+    #[inline]
+    pub fn proto(&self) -> &Proto {
+        &self.proto
+    }
+
+    #[inline]
+    pub fn hash(&self) -> &Hash {
+        &self.hash
     }
 
     #[inline]
@@ -244,9 +236,11 @@ impl<
     pub fn take(
         self
     ) -> (
-        ConsensusConfig<
-            PartyCodec,
-//            Proto,
+        RoundIDs,
+        LargeObjProtoConfig<(), (), IDs>,
+        Hash,
+        Proto,
+        MulticastDatagramBusConfig<
             PartyID,
             ConsensusAuthN,
             ConsensusUnix,
@@ -270,89 +264,8 @@ impl<
             PeerEpochs
         >
     ) {
-        (self.consensus, self.peers)
-    }
-}
-
-impl<
-    PartyCodec,
-//    Proto,
-    PartyID,
-    AuthN,
-    Unix,
-    UDP,
-    Enc,
-    Dec,
-    Resolver,
-    Epochs,
-    MsgAuthN,
-> ConsensusConfig<
-    PartyCodec,
-//    Proto,
-    PartyID,
-    AuthN,
-    Unix,
-    UDP,
-    Enc,
-    Dec,
-    Resolver,
-    Epochs,
-    MsgAuthN,
-> where
-    PartyCodec: Default,
-    Resolver: Default,
-//    Proto: Default,
-    Epochs: Default,
-    Unix: Default,
-    UDP: Default,
-    Enc: Default,
-    Dec: Default {
-    #[inline]
-    pub fn multicast(
-        &self
-    ) -> &MulticastDatagramBusConfig<
-        PartyID,
-        AuthN,
-        Unix,
-        UDP,
-        Enc,
-        Dec,
-        Resolver,
-        Epochs,
-        MsgAuthN
-    > {
-        &self.multicast
-    }
-
-    #[inline]
-    pub fn party_codec(&self) -> &PartyCodec {
-        &self.party_codec
-    }
-/*
-    #[inline]
-    pub fn proto(&self) -> &Proto {
-        &self.proto
-    }
-*/
-    #[inline]
-    pub fn take(
-        self
-    ) -> (
-//        Proto,
-        PartyCodec,
-        MulticastDatagramBusConfig<
-            PartyID,
-            AuthN,
-            Unix,
-            UDP,
-            Enc,
-            Dec,
-            Resolver,
-            Epochs,
-            MsgAuthN
-        >
-    ) {
-        (/*self.proto,*/ self.party_codec, self.multicast)
+        (self.round_ids, self.large_obj, self.hash,
+         self.proto, self.multicast, self.peers)
     }
 }
 

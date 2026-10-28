@@ -58,15 +58,17 @@ use mio::Waker;
 
 use crate::peers::PeerSessionState;
 use crate::types::ConsensusPeerTypes;
-use crate::types::ConsensusStateTypes;
+use crate::types::ConsensusRecvTypes;
 
 const WAKER_TOKEN: Token = Token(0);
 
-pub(crate) struct State<IDTypes, Types>
+pub(crate) struct State<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
-    Types: ConsensusStateTypes<IDTypes>,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     // XXX it should be possible to separate out the outbound mailbox
     // and just use that.
@@ -80,9 +82,10 @@ where
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Send,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
-    state: State<IDTypes, Types>,
+    poll: Poll,
+    state: State<IDTypes, ProtoTypes, Types>,
     round_reqs: Receiver<Vec<Types::HashID>>,
     msgs: Receiver<(MulticastStreamIdx, ProtoTypes::Msg)>,
     peers: PeerSessionState<IDTypes, ProtoTypes, Types>,
@@ -121,12 +124,30 @@ enum WithIOError<Inner> {
     }
 }
 
-impl<IDTypes, Types, Msg> SharedMsgs<MulticastStreamIdx, Msg>
-    for State<IDTypes, Types>
+impl<IDTypes, ProtoTypes, Types> Clone for State<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
-    Types: ConsensusStateTypes<IDTypes>,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
+    Types::Hash: Send {
+    #[inline]
+    fn clone(&self) -> Self {
+        State {
+            rounds: self.rounds.clone()
+        }
+    }
+}
+
+impl<IDTypes, ProtoTypes, Types, Msg> SharedMsgs<MulticastStreamIdx, Msg>
+    for State<IDTypes, ProtoTypes, Types>
+where
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Rounds: SharedMsgs<MulticastStreamIdx, Msg>,
     Types::Hash: Send,
     Msg: RoundMsg<IDTypes::RoundID> {
@@ -153,14 +174,16 @@ where
     }
 }
 
-impl<IDTypes, Types> State<IDTypes, Types>
+impl<IDTypes, ProtoTypes, Types> State<IDTypes, ProtoTypes, Types>
 where
     IDTypes: PartyTypes + RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
-    Types: ConsensusStateTypes<IDTypes>,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     #[inline]
-    fn new(
+    pub(crate) fn new(
         rounds: Types::Rounds,
     ) -> Self {
         State {
@@ -212,7 +235,7 @@ where
             .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 
-    fn recv<ProtoTypes>(
+    fn recv(
         &self,
         party: MulticastStreamIdx,
         msg: ProtoTypes::Msg,
@@ -229,10 +252,7 @@ where
             Types::BatchError,
             Types::AdvanceError
         >
-    >
-    where
-        ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
-        Types::Rounds: RoundsRecv<IDTypes, ProtoTypes, Types::Oper> {
+    > {
         let mut guard = self.rounds
             .lock()
             .map_err(|_| StateRecvError::MutexPoison)?;
@@ -262,24 +282,29 @@ where
     ProtoTypes::Msg: Send,
     Types::Rounds: RoundsRecv<IDTypes, ProtoTypes, Types::Oper>,
     Types: 'static + ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
-    pub(crate) fn create(
-        state: State<IDTypes, Types>,
+    pub(crate) fn new(
+        state: State<IDTypes, ProtoTypes, Types>,
         peers: PeerSessionState<IDTypes, ProtoTypes, Types>,
         peers_notify: Notify,
         sender_notify: Notify,
         shutdown: ShutdownFlag,
         hash: Types::Hash
-    ) -> (
+    ) -> Result<(
         Self,
         Sender<Vec<Types::HashID>>,
         Sender<(MulticastStreamIdx, ProtoTypes::Msg)>,
-    ) {
+        Notify
+    ), std::io::Error> {
+        let poll = Poll::new()?;
+        let waker = Waker::new(poll.registry(), WAKER_TOKEN)?;
+        let waker = Arc::new(waker);
+        let notify = Notify::new(waker);
         let (round_reqs_send, round_reqs_recv) = channel();
         let (msgs_send, msgs_recv) = channel();
-
-        (StateThread {
+        let thread = StateThread {
+            poll: poll,
             shutdown: shutdown,
             round_reqs: round_reqs_recv,
             sender_notify: sender_notify,
@@ -288,9 +313,9 @@ where
             peers_notify: peers_notify,
             peers: peers,
             hash: hash
-        },
-         round_reqs_send,
-         msgs_send)
+        };
+
+        Ok((thread, round_reqs_send, msgs_send, notify))
     }
 
     #[inline]
@@ -440,7 +465,6 @@ where
 
     fn run(
         mut self,
-        mut poll: Poll
     ) {
         let mut next = Some(Instant::now());
         let mut events = Events::with_capacity(1);
@@ -465,7 +489,7 @@ where
                                "waiting for poll indefinitely");
                     }
 
-                    poll.poll(&mut events, duration)
+                    self.poll.poll(&mut events, duration)
                         .inspect_err(|err| {
                             error!(target: "poll-thread",
                                    "error polling: {}",
@@ -489,27 +513,7 @@ where
     pub(crate) fn start(self) -> Result<JoinHandle<()>, std::io::Error> {
         Builder::new()
             .name(String::from("consensus-state-thread"))
-            .spawn(move || {
-                match Poll::new() {
-                    Ok(poll) => match Waker::new(poll.registry(), WAKER_TOKEN) {
-                        Ok(waker) => {
-                            let notify = Notify::new(Arc::new(waker));
-
-                            self.run(poll)
-                        }
-                        Err(err) => {
-                            error!(target: "consensus-component-state-thread",
-                                   "error creating notify: {}",
-                                   err)
-                        }
-                    }
-                    Err(err) => {
-                        error!(target: "consensus-component-state-thread",
-                               "error creating poll: {}",
-                               err)
-                    }
-                }
-            })
+            .spawn(move || self.run())
     }
 }
 

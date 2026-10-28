@@ -46,6 +46,8 @@ use constellation_channels::far::FarChannelCreate;
 use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
+use constellation_common::config::Create;
+use constellation_common::config::CreateWithParam;
 use constellation_common::codec::DatagramCodec;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
@@ -66,7 +68,9 @@ use constellation_component_common::config::PartiesConfig;
 use constellation_component_common::config::DispatchLargeObjBusConfig;
 use constellation_component_common::config::MulticastDatagramBusConfig;
 use constellation_component_common::bus::dispatch::DispatchLargeObjBus;
+use constellation_component_common::bus::dispatch::DispatchLargeObjBusStarter;
 use constellation_component_common::bus::multicast::MulticastDatagramBus;
+use constellation_component_common::bus::multicast::MulticastDatagramBusStarter;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
 use constellation_consensus_common::oper::OperBatch;
@@ -83,26 +87,19 @@ use constellation_pbft::proto::PBFTProto;
 use constellation_standalone::Standalone;
 #[cfg(feature = "standalone")]
 use constellation_standalone::StandaloneService;
-use constellation_streams::addrs::Addrs;
-use constellation_streams::addrs::AddrsCreate;
-use constellation_streams::channels::ChannelParam;
-use constellation_streams::config::LargeObjProtoConfig;
-use constellation_streams::error::ErrorReportInfo;
-use constellation_streams::large_obj::LargeObjID;
 use constellation_streams::multicast::MulticastStreamIdx;
-use constellation_streams::stream::StreamID;
 use log::debug;
 use log::error;
 use log::info;
 use log::warn;
 
-use crate::config::ConsensusConfig;
+use crate::config::ConsensusComponentConfig;
 //#[cfg(feature = "standalone")]
 //use crate::config::StandaloneConfig;
 use crate::peers::PeerSessionDispatch;
+use crate::peers::PeerSessionState;
 use crate::recv::ConsensusAuthNRecv;
 use crate::state::State;
-use crate::state::StateMsgs;
 use crate::state::StateThread;
 use crate::types::ConsensusTypes;
 
@@ -117,44 +114,18 @@ pub struct PartyRoundIdx(usize);
 pub struct StringPrincipalCodec;
 
 pub struct ConsensusComponent<Types>
-where Types: ConsensusTypes
+where Types: 'static + ConsensusTypes
 {
-    round_ids: Types::RoundIDs,
-    consensus_config: ConsensusConfig<
-        Types::PartyCodecConfig,
-//    Proto,
-        Types::Party,
-        Types::ConsensusSessAuthConfig,
-        Types::ConsensusUnixConfig,
-        Types::ConsensusUDPConfig,
-        Types::ConsensusEncoderConfig,
-        Types::ConsensusDecoderConfig,
-        Types::ResolverConfig,
-        Types::ConsensusEpochsConfig,
-        Types::ConsensusMsgAuthConfig,
-    >,
-    peers_bus_config: DispatchLargeObjBusConfig<
-        Types::PeerHashConfig,
-        Types::PeerSessionAuthConfig,
-        Types::PeerMsgAuthConfig,
-        Types::PeerProtoAuthConfig,
-        Types::PeerUnixConfig,
-        Types::PeerUDPConfig,
-        (),
-        (),
-        Types::IDsConfig,
-        Types::PeerEpochsConfig
-    >,
-    shutdown: ShutdownFlag,
-    consensus_ctx: Types::Ctx,
-    peers_ctx: Types::Ctx
+    state: StateThread<Types::IDTypes, Types::ProtoTypes, Types>,
+    multicast: MulticastDatagramBusStarter<Types::ConsensusBusTypes, Types::Ctx>,
+    peers: DispatchLargeObjBusStarter<Types::PeerBusTypes, Types::Ctx>,
 }
 
 pub struct ConsensusComponentCleanup<Types>
 where Types: 'static + ConsensusTypes
 {
     shutdown: ShutdownFlag,
-    multicast: MulticastDatagramBus<Types::ConsensusBusTypes, Types::Ctx>,
+    consensus: MulticastDatagramBus<Types::ConsensusBusTypes, Types::Ctx>,
     peers: DispatchLargeObjBus<Types::PeerBusTypes, Types::Ctx>,
     state_join: JoinHandle<()>
 }
@@ -179,170 +150,87 @@ impl<Types> ConsensusComponent<Types>
 where Types: ConsensusTypes
 {
     pub fn start(
-        self
+        config: ConsensusComponentConfig<
+            Types::RoundIDsConfig,
+            Types::ConsensusConfig,
+            Types::Prin,
+            Types::HashConfig,
+            Types::IDsConfig,
+            Types::ConsensusSessAuthConfig,
+            Types::ConsensusUnixConfig,
+            Types::ConsensusUDPConfig,
+            Types::ConsensusEncoderConfig,
+            Types::ConsensusDecoderConfig,
+            Types::ResolverConfig,
+            Types::ConsensusEpochsConfig,
+            Types::ConsensusMsgAuthConfig,
+            Types::PeerHashConfig,
+            Types::PeerSessAuthConfig,
+            Types::PeerMsgAuthConfig,
+            Types::PeerProtoAuthConfig,
+            Types::PeerUnixConfig,
+            Types::PeerUDPConfig,
+            Types::IDsConfig,
+            Types::PeerEpochsConfig
+        >,
+        ctx: Types::Ctx,
+        shutdown: ShutdownFlag
     ) -> Result<ConsensusComponentCleanup<Types>, ConsensusComponentRunError> {
-        let ConsensusComponent {
-            consensus_config,
-            peers_bus_config,
-            consensus_ctx,
-            peers_ctx,
-            shutdown,
-            round_ids,
-            ..
-        } = self;
-
         info!(target: "consensus-component",
               "starting consensus component");
 
-        let (proto_config, self_party, prin_codec_param, multicast_config) =
-            consensus_config.take();
-        let prin_codec = match Types::PartyCodec::create(prin_codec_param) {
-            Ok(codec) => codec,
-            Err(err) => {
-                error!(target: "consensus-component",
-                       "error creating principal codec: {}",
-                       err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
-        let proto: SharedConsensusProto<Types::Proto, Types::ProtoTypes> =
-            match SharedConsensusProto::create(proto_config, prin_codec.clone())
-        {
-            Ok(proto) => proto,
-            Err(err) => {
-                error!(target: "consensus-component",
-                           "error creating consensus protocol: {}",
-                           err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
-        let rounds = match proto.rounds(round_ids) {
-            Ok(proto) => proto,
-            Err(err) => {
-                error!(target: "consensus-component",
-                           "error creating consensus protocol rounds: {}",
-                           err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
+        let (round_ids_config, large_obj_config, hash_config,
+             proto_config, consensus_config, peers_config) =
+            config.take();
+        // XXX Hacky and wrong way to set parties
+        let parties: Vec<(MulticastStreamIdx, Types::Prin)> = consensus_config
+            .thread()
+            .stream()
+            .parties()
+            .iter()
+            .enumerate()
+            .map(|(i, party)| (MulticastStreamIdx::from(i),
+                               party.party().clone()))
+            .collect();
+        let round_ids = Types::RoundIDs::create(round_ids_config)?;
+        let hash = Types::Hash::create(hash_config)?;
+        let proto = Types::Consensus::create(proto_config)?;
+        let rounds = proto.rounds(round_ids)?;
+        let (peers, peers_notify) =
+            DispatchLargeObjBusStarter::create(peers_config, ctx.clone())?;
+        let (consensus, consensus_notify) =
+            MulticastDatagramBusStarter::create(consensus_config, ctx.clone())?;
+        let peer_state = PeerSessionState::new();
         let state = State::new(rounds);
-        let state = Arc::new(state);
-        let peer_dispatch =
-            PeerSessionDispatch::new(peers_bus_config, state.clone());
-        let peers_comm: DispatchLargeObjBus<Types::PeerBusTypes, Types::Ctx> =
-            match DispatchLargeObjBus::create(
-                peers_bus_config,
-                peer_dispatch,
-                shutdown.clone(),
-                peers_ctx
-            ) {
-                Ok(peer_comm) => peer_comm,
-                Err(err) => {
-                    error!(target: "consensus-component",
-                           "error creating peer dispatch comm: {}",
-                           err);
-
-                    return Err(ConsensusComponentRunError);
-                }
-            };
-        let notify = state.notify();
-        let (state_thread, round_reporter) = StateThread::create(
-            state.clone(),
-            shutdown.clone(),
-            Types::Hash::default()
+        let (state_thread, peers_sender, consensus_sender, state_notify) =
+            StateThread::new(
+                state.clone(), peer_state, peers_notify,
+                consensus_notify, shutdown, hash
+            )?;
+        // XXX use size hints.
+        let peer_dispatch = PeerSessionDispatch::new(
+            large_obj_config,
+            peers_sender,
+            state_notify,
+            None,
+            None
         );
-        let mut authn_msg_recv = ConsensusAuthNRecv::create(
-            round_reporter,
-            state.clone(),
-            notify.clone()
+        let mut consensus_recv = ConsensusAuthNRecv::create(
+            consensus_sender, state_notify.clone()
         );
-        let multicast: MulticastDatagramBus<Types::ConsensusBusTypes,
-                                            Types::Ctx> =
-            match MulticastDatagramBus::create(
-                Some(self_party.clone()),
-                multicast_config,
-                consensus_ctx,
-                shutdown.clone(),
-                notify,
-                authn_msg_recv.clone(),
-                StateMsgs::from(state.clone())
-            ) {
-                Ok(multicast) => multicast,
-                Err(err) => {
-                    error!(target: "consensus-component",
-                           "error creating consensus multicast comm: {}",
-                           err);
+        let state_join = state_thread.start()?;
 
-                    return Err(ConsensusComponentRunError);
-                }
-            };
-        let party_data = match multicast.parties() {
-            Ok(parties) => {
-                let mut parties: Vec<(MulticastStreamIdx, Types::Party)> =
-                    parties.collect();
+        consensus_recv.set_parties(parties.into_iter())?;
 
-                parties.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        let peers = peers.start(peer_dispatch, shutdown)?;
+        let consensus = consensus.start(consensus_recv, state, shutdown)?;
 
-                let mut party_data = Vec::with_capacity(parties.len());
-
-                for (idx, party) in parties.into_iter() {
-                    let idx: usize = idx.into();
-
-                    if idx == party_data.len() {
-                        party_data.push(party)
-                    } else {
-                        error!(target: "consensus-component",
-                               "stream parties skipped an index");
-
-                        return Err(ConsensusComponentRunError);
-                    }
-                }
-
-                party_data
-            }
-        };
-
-        if let Err(err) = state.init_rounds(prin_codec, self_party, &party_data)
-        {
-            error!("error setting parties: {}", err);
-
-            return Err(ConsensusComponentRunError);
-        }
-
-        let Ok(party_iter) = multicast.parties();
-
-        if let Err(err) = authn_msg_recv.set_parties(party_iter) {
-            error!("error setting parties: {}", err);
-        }
-
-        let state_join = state_thread.start();
-
-        debug!(target: "consensus-component",
-               "starting multicaster");
-
-        match multicast.start() {
-            Ok(multicast_cleanup) => match peers_comm.start() {
-                Ok(peers_cleanup) => Ok(ConsensusComponentCleanup {
-                    shutdown: shutdown,
-                    multicast: multicast_cleanup,
-                    peers: peers_cleanup,
-                    state_join: state_join
-                }),
-                Err(err) => {
-                    error!("error starting peers bus: {}", err);
-
-                    Err(ConsensusComponentRunError)
-                }
-            },
-            Err(err) => {
-                error!("error starting multicast bus: {}", err);
-
-                Err(ConsensusComponentRunError)
-            }
-        }
+        Ok(ConsensusComponentCleanup {
+            shutdown: shutdown,
+            consensus: consensus,
+            peers: peers,
+            state_join: state_join
+        })
     }
 }
 
@@ -351,7 +239,7 @@ where Types: ConsensusTypes
 {
     pub fn cleanup(mut self) {
         self.shutdown.set();
-        self.multicast.cleanup();
+        self.consensus.cleanup();
         self.peers.cleanup();
 
         debug!(target: "consensus-component-cleanup",

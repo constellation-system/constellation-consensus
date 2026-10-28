@@ -39,6 +39,7 @@ use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
+use constellation_common::sync::NotifyFlag;
 use constellation_component_common::bus::dispatch::SessionDispatch;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::consensus_ctl::ConsensusCtlRound;
@@ -57,7 +58,6 @@ use log::warn;
 
 use crate::types::ConsensusPeerTypes;
 use crate::types::ConsensusRecvTypes;
-use crate::types::ConsensusStateTypes;
 
 pub(crate) struct PeerSessionDispatch<IDTypes, ProtoTypes, Types>
 where
@@ -65,8 +65,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     config: LargeObjProtoConfig<(), (), Types::IDsConfig>,
     sessions: Arc<Mutex<HashMap<Types::PeerPrin, PeerSession>>>,
@@ -81,8 +80,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     id_types: PhantomData<IDTypes>,
     proto_types: PhantomData<ProtoTypes>,
@@ -137,8 +135,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     id: PhantomData<IDTypes>,
     proto: PhantomData<ProtoTypes>,
@@ -225,6 +222,18 @@ where
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
+    // XXX Add size hints
+    #[inline]
+    pub(crate) fn new() -> Self {
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let pending = Arc::new(Mutex::new(Vec::new()));
+
+        PeerSessionState {
+            pending: pending,
+            peers: peers
+        }
+    }
+
     fn add_peer(
         &self,
         peer: Types::PeerPrin,
@@ -315,8 +324,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     fn clone(&self) -> Self {
         PeerSessionRecv {
@@ -405,8 +413,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     /// Errors that can occur reporting messages.
     type RecvError = PeerSessionRecvError<Types::HashID>;
@@ -447,8 +454,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     pub(crate) fn new(
         config: LargeObjProtoConfig<(), (), Types::IDsConfig>,
@@ -481,6 +487,11 @@ where
             send: send
         }
     }
+
+    #[inline]
+    pub(crate) fn state(&self) -> PeerSessionState<IDTypes, ProtoTypes, Types> {
+        self.state.clone()
+    }
 }
 
 impl<IDTypes, ProtoTypes, Types> SessionDispatchTypes
@@ -490,8 +501,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> + Send,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     type SessionPrin = Types::PeerPrin;
     type Msgs = PeerSessionMsgs<IDTypes, ProtoTypes, Types>;
@@ -506,8 +516,7 @@ where
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> + Send,
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
-        + ConsensusRecvTypes<IDTypes, ProtoTypes>
-        + ConsensusStateTypes<IDTypes>,
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     type SessionError = PeerSessionDispatchError<
         Types::PeerPrin,
@@ -520,7 +529,7 @@ where
         &self,
         peer: &Types::PeerPrin,
         _shutdown: ShutdownFlag,
-        notify: Notify
+        notify: NotifyFlag
     ) -> Result<
         (
             ShutdownFlag,
@@ -557,7 +566,7 @@ where
             notify: self.state_notify.clone()
         };
 
-        self.state.add_peer(peer.clone(), notify);
+        self.state.add_peer(peer.clone(), notify.into());
 
         let msgs = PeerSessionMsgs {
             proto_types: PhantomData,
