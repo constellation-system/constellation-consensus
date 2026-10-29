@@ -41,7 +41,7 @@ use log::warn;
 
 use crate::types::ConsensusRecvTypes;
 
-pub(crate) struct ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
+pub struct ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,

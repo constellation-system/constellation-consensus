@@ -46,7 +46,6 @@ use constellation_component_common::consensus_ctl::ConsensusCtlRound;
 use constellation_component_common::bus::types::SessionDispatchTypes;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
-use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::frags::Frags;
 use constellation_streams::large_obj::LargeObjMsgs;
 use constellation_streams::large_obj::LargeObjProtoAddOutboundError;
@@ -54,12 +53,13 @@ use constellation_streams::large_obj::LargeObjProtoCreateError;
 use constellation_streams::large_obj::LargeObjSender;
 use constellation_streams::multicast::MulticastStreamIdx;
 use log::debug;
+use log::error;
 use log::warn;
 
 use crate::types::ConsensusPeerTypes;
 use crate::types::ConsensusRecvTypes;
 
-pub(crate) struct PeerSessionDispatch<IDTypes, ProtoTypes, Types>
+pub struct PeerSessionDispatch<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
@@ -67,14 +67,13 @@ where
     Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
         + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
-    config: LargeObjProtoConfig<(), (), Types::IDsConfig>,
     sessions: Arc<Mutex<HashMap<Types::PeerPrin, PeerSession>>>,
     state: PeerSessionState<IDTypes, ProtoTypes, Types>,
     send: Sender<Vec<Types::HashID>>,
     state_notify: Notify,
 }
 
-pub(crate) struct PeerSessionRecv<IDTypes, ProtoTypes, Types>
+pub struct PeerSessionRecv<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
@@ -113,7 +112,7 @@ where
     pending: Arc<Mutex<Vec<PeerSessionMsgState<IDTypes, ProtoTypes, Types>>>>,
 }
 
-pub(crate) struct PeerSessionMsgs<IDTypes, ProtoTypes, Types>
+pub struct PeerSessionMsgs<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
@@ -127,6 +126,16 @@ where
 
 struct PeerSession {
     local_shutdown: ShutdownFlag
+}
+
+impl Drop for PeerSession {
+    fn drop(&mut self) {
+        if let Err(err) = self.local_shutdown.set() {
+            error!(target: "peer-session",
+                   "error setting shutdown flag: {}",
+                   err)
+        }
+    }
 }
 
 struct PeerSessionDispatchTypes<IDTypes, ProtoTypes, Types>
@@ -143,7 +152,7 @@ where
 }
 
 #[derive(Debug)]
-pub(crate) enum PeerSessionDispatchError<Prin, Encoder, Decoder, IDs> {
+pub enum PeerSessionDispatchError<Prin, Encoder, Decoder, IDs> {
     Proto {
         err: LargeObjProtoCreateError<Encoder, Decoder, IDs>
     },
@@ -154,7 +163,7 @@ pub(crate) enum PeerSessionDispatchError<Prin, Encoder, Decoder, IDs> {
 }
 
 #[derive(Debug)]
-pub(crate) enum PeerSessionRecvError<HashID> {
+pub enum PeerSessionRecvError<HashID> {
     Send {
         err: SendError<Vec<HashID>>
     },
@@ -164,7 +173,7 @@ pub(crate) enum PeerSessionRecvError<HashID> {
 }
 
 #[derive(Debug)]
-pub(crate) enum PeerSessionAddMsgsError<Encode> {
+pub enum PeerSessionAddMsgsError<Encode> {
     LargeObj {
         err: LargeObjProtoAddOutboundError<Encode>
     },
@@ -457,7 +466,6 @@ where
         + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send {
     pub(crate) fn new(
-        config: LargeObjProtoConfig<(), (), Types::IDsConfig>,
         send: Sender<Vec<Types::HashID>>,
         state_notify: Notify,
         npeers_hint: Option<usize>,
@@ -482,15 +490,9 @@ where
         PeerSessionDispatch {
             state_notify: state_notify,
             sessions: sessions,
-            config: config,
             state: state,
             send: send
         }
-    }
-
-    #[inline]
-    pub(crate) fn state(&self) -> PeerSessionState<IDTypes, ProtoTypes, Types> {
-        self.state.clone()
     }
 }
 
@@ -566,7 +568,8 @@ where
             notify: self.state_notify.clone()
         };
 
-        self.state.add_peer(peer.clone(), notify.into());
+        self.state.add_peer(peer.clone(), notify.into())
+            .map_err(|_| PeerSessionDispatchError::MutexPoison)?;
 
         let msgs = PeerSessionMsgs {
             proto_types: PhantomData,

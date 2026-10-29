@@ -51,6 +51,8 @@ use constellation_common::config::CreateWithParam;
 use constellation_common::codec::DatagramCodec;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
+use constellation_common::error::MutexPoison;
+use constellation_common::error::WithMutexPoison;
 use constellation_common::hashid::HashAlgo;
 use constellation_common::hashid::SHA3Algo;
 use constellation_common::ids::AscendingCount;
@@ -88,6 +90,7 @@ use constellation_standalone::Standalone;
 #[cfg(feature = "standalone")]
 use constellation_standalone::StandaloneService;
 use constellation_streams::multicast::MulticastStreamIdx;
+use constellation_streams::threads::poll::PollThreadStartError;
 use log::debug;
 use log::error;
 use log::info;
@@ -114,7 +117,7 @@ pub struct PartyRoundIdx(usize);
 pub struct StringPrincipalCodec;
 
 pub struct ConsensusComponent<Types>
-where Types: 'static + ConsensusTypes
+where Types: 'static + ConsensusTypes + Send
 {
     state: StateThread<Types::IDTypes, Types::ProtoTypes, Types>,
     multicast: MulticastDatagramBusStarter<Types::ConsensusBusTypes, Types::Ctx>,
@@ -122,7 +125,7 @@ where Types: 'static + ConsensusTypes
 }
 
 pub struct ConsensusComponentCleanup<Types>
-where Types: 'static + ConsensusTypes
+where Types: 'static + ConsensusTypes + Send
 {
     shutdown: ShutdownFlag,
     consensus: MulticastDatagramBus<Types::ConsensusBusTypes, Types::Ctx>,
@@ -130,7 +133,27 @@ where Types: 'static + ConsensusTypes
     state_join: JoinHandle<()>
 }
 
-pub struct ConsensusComponentRunError;
+pub enum ConsensusComponentRunError<RoundIDs, Hash, Consensus, Rounds> {
+    RoundIDs {
+        err: RoundIDs
+    },
+    Hash {
+        err: Hash
+    },
+    Consensus {
+        err: Consensus
+    },
+    Rounds {
+        err: Rounds
+    },
+    Poll {
+        err: PollThreadStartError
+    },
+    IO {
+        err: std::io::Error
+    },
+    MutexPoison
+}
 
 impl From<usize> for PartyRoundIdx {
     #[inline]
@@ -147,7 +170,7 @@ impl From<PartyRoundIdx> for usize {
 }
 
 impl<Types> ConsensusComponent<Types>
-where Types: ConsensusTypes
+where Types: ConsensusTypes + Send
 {
     pub fn start(
         config: ConsensusComponentConfig<
@@ -155,7 +178,6 @@ where Types: ConsensusTypes
             Types::ConsensusConfig,
             Types::Prin,
             Types::HashConfig,
-            Types::IDsConfig,
             Types::ConsensusSessAuthConfig,
             Types::ConsensusUnixConfig,
             Types::ConsensusUDPConfig,
@@ -175,12 +197,20 @@ where Types: ConsensusTypes
         >,
         ctx: Types::Ctx,
         shutdown: ShutdownFlag
-    ) -> Result<ConsensusComponentCleanup<Types>, ConsensusComponentRunError> {
+    ) -> Result<
+        ConsensusComponentCleanup<Types>,
+        ConsensusComponentRunError<
+            Types::RoundIDsCreateError,
+            Types::HashCreateError,
+            Types::ConsensusCreateError,
+            Types::ConsensusRoundsError,
+        >
+    > {
         info!(target: "consensus-component",
               "starting consensus component");
 
-        let (round_ids_config, large_obj_config, hash_config,
-             proto_config, consensus_config, peers_config) =
+        let (round_ids_config, hash_config, proto_config,
+             consensus_config, peers_config) =
             config.take();
         // XXX Hacky and wrong way to set parties
         let parties: Vec<(MulticastStreamIdx, Types::Prin)> = consensus_config
@@ -192,38 +222,53 @@ where Types: ConsensusTypes
             .map(|(i, party)| (MulticastStreamIdx::from(i),
                                party.party().clone()))
             .collect();
-        let round_ids = Types::RoundIDs::create(round_ids_config)?;
-        let hash = Types::Hash::create(hash_config)?;
-        let proto = Types::Consensus::create(proto_config)?;
-        let rounds = proto.rounds(round_ids)?;
+        let round_ids = Types::RoundIDs::create(round_ids_config)
+            .map_err(|err| ConsensusComponentRunError::RoundIDs { err: err })?;
+        let hash = Types::Hash::create(hash_config)
+            .map_err(|err| ConsensusComponentRunError::Hash { err: err })?;
+        let proto = Types::Consensus::create(proto_config)
+            .map_err(|err| ConsensusComponentRunError::Consensus { err: err })?;
+        let rounds = proto.rounds(round_ids)
+            .map_err(|err| ConsensusComponentRunError::Rounds { err: err })?;
         let (peers, peers_notify) =
-            DispatchLargeObjBusStarter::create(peers_config, ctx.clone())?;
+            DispatchLargeObjBusStarter::create(peers_config, ctx.clone())
+            .map_err(|err| ConsensusComponentRunError::IO { err: err })?;
         let (consensus, consensus_notify) =
-            MulticastDatagramBusStarter::create(consensus_config, ctx.clone())?;
+            MulticastDatagramBusStarter::create(consensus_config, ctx.clone())
+            .map_err(|err| ConsensusComponentRunError::IO { err: err })?;
         let peer_state = PeerSessionState::new();
         let state = State::new(rounds);
         let (state_thread, peers_sender, consensus_sender, state_notify) =
             StateThread::new(
                 state.clone(), peer_state, peers_notify,
-                consensus_notify, shutdown, hash
-            )?;
+                consensus_notify, shutdown.clone(), hash
+            )
+            .map_err(|err| ConsensusComponentRunError::IO { err: err })?;
         // XXX use size hints.
         let peer_dispatch = PeerSessionDispatch::new(
-            large_obj_config,
             peers_sender,
-            state_notify,
+            state_notify.clone(),
             None,
             None
         );
         let mut consensus_recv = ConsensusAuthNRecv::create(
             consensus_sender, state_notify.clone()
         );
-        let state_join = state_thread.start()?;
+        let state_join = state_thread.start()
+            .map_err(|err| ConsensusComponentRunError::IO { err: err })?;
 
-        consensus_recv.set_parties(parties.into_iter())?;
+        consensus_recv.set_parties(parties.into_iter())
+            .map_err(|_| ConsensusComponentRunError::MutexPoison)?;
 
-        let peers = peers.start(peer_dispatch, shutdown)?;
-        let consensus = consensus.start(consensus_recv, state, shutdown)?;
+        let peers = peers.start(peer_dispatch, shutdown.clone())
+            .map_err(|err| match err {
+                WithMutexPoison::Inner { err } =>
+                    ConsensusComponentRunError::IO { err: err },
+                WithMutexPoison::MutexPoison =>
+                    ConsensusComponentRunError::MutexPoison
+            })?;
+        let consensus = consensus.start(consensus_recv, state, shutdown.clone())
+            .map_err(|err| ConsensusComponentRunError::Poll { err: err })?;
 
         Ok(ConsensusComponentCleanup {
             shutdown: shutdown,
@@ -235,10 +280,15 @@ where Types: ConsensusTypes
 }
 
 impl<Types> ConsensusComponentCleanup<Types>
-where Types: ConsensusTypes
+where Types: ConsensusTypes + Send
 {
     pub fn cleanup(mut self) {
-        self.shutdown.set();
+        if let Err(err) = self.shutdown.set() {
+            error!(target: "consensus-component-cleanup",
+                   "error setting shutdown flag: {}",
+                   err);
+        }
+
         self.consensus.cleanup();
         self.peers.cleanup();
 
@@ -277,6 +327,31 @@ impl NSNameCachesCtx for StandaloneCtx {
         &mut self.caches
     }
 }
+
+impl<RoundIDs, Hash, Consensus, Rounds> Display
+    for ConsensusComponentRunError<RoundIDs, Hash, Consensus, Rounds>
+where
+    RoundIDs: Display,
+    Hash: Display,
+    Consensus: Display,
+    Rounds: Display {
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            ConsensusComponentRunError::RoundIDs { err } => err.fmt(f),
+            ConsensusComponentRunError::Hash { err } => err.fmt(f),
+            ConsensusComponentRunError::Consensus { err } => err.fmt(f),
+            ConsensusComponentRunError::Rounds { err } => write!(f, "{}", err),
+            ConsensusComponentRunError::Poll { err } => write!(f, "{}", err),
+            ConsensusComponentRunError::IO { err } => write!(f, "{}", err),
+            ConsensusComponentRunError::MutexPoison =>
+                write!(f, "mutex poisoned")
+        }
+    }
+}
+
 /*
 // ISSUE #2: AscendingCount is temporary, and will be replaced with a random
 // number stream.

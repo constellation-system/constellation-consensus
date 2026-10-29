@@ -62,7 +62,7 @@ use crate::types::ConsensusRecvTypes;
 
 const WAKER_TOKEN: Token = Token(0);
 
-pub(crate) struct State<IDTypes, ProtoTypes, Types>
+pub struct State<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,

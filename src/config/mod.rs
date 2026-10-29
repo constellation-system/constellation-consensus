@@ -49,7 +49,6 @@ pub struct ConsensusComponentConfig<
     Proto,
     PartyID,
     Hash,
-    IDs,
     ConsensusAuthN,
     ConsensusUnix,
     ConsensusUDP,
@@ -70,7 +69,6 @@ pub struct ConsensusComponentConfig<
     RoundIDs: Default,
     Proto: Default,
     Hash: Default,
-    IDs: Default,
     ConsensusResolver: Default,
     ConsensusEpochs: Default,
     ConsensusUnix: Default,
@@ -85,8 +83,6 @@ pub struct ConsensusComponentConfig<
     /// Channel registry configuration.
     #[serde(default)]
     round_ids: RoundIDs,
-    #[serde(default)]
-    large_obj: LargeObjProtoConfig<(), (), IDs>,
     #[serde(default)]
     hash: Hash,
     #[serde(default)]
@@ -122,7 +118,6 @@ impl<
     Proto,
     PartyID,
     Hash,
-    IDs,
     ConsensusAuthN,
     ConsensusUnix,
     ConsensusUDP,
@@ -144,7 +139,6 @@ impl<
     Proto,
     PartyID,
     Hash,
-    IDs,
     ConsensusAuthN,
     ConsensusUnix,
     ConsensusUDP,
@@ -165,7 +159,6 @@ impl<
     RoundIDs: Default,
     Proto: Default,
     Hash: Default,
-    IDs: Default,
     ConsensusResolver: Default,
     ConsensusEpochs: Default,
     ConsensusUnix: Default,
@@ -192,11 +185,6 @@ impl<
         ConsensusMsgAuthN,
     > {
         &self.multicast
-    }
-
-    #[inline]
-    pub fn large_obj(&self) -> &LargeObjProtoConfig<(), (), IDs> {
-        &self.large_obj
     }
 
     #[inline]
@@ -237,7 +225,6 @@ impl<
         self
     ) -> (
         RoundIDs,
-        LargeObjProtoConfig<(), (), IDs>,
         Hash,
         Proto,
         MulticastDatagramBusConfig<
@@ -264,8 +251,7 @@ impl<
             PeerEpochs
         >
     ) {
-        (self.round_ids, self.large_obj, self.hash,
-         self.proto, self.multicast, self.peers)
+        (self.round_ids, self.hash, self.proto, self.multicast, self.peers)
     }
 }
 
