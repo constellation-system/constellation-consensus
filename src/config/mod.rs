@@ -255,7 +255,6 @@ impl<
     }
 }
 
-/*
 /// Top-level master configuration object.
 ///
 /// Most configuration objects should be contained in
@@ -263,50 +262,153 @@ impl<
 /// that need to exist in a standalone instance, such as
 /// [NameCachesRefreshConfig].
 #[cfg(feature = "standalone")]
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "consensus-config")]
 #[serde(rename_all = "kebab-case")]
-pub struct StandaloneConfig {
+pub struct StandaloneConfig<
+    RoundIDs,
+    Proto,
+    Hash,
+    ConsensusAuthN,
+    ConsensusUnix,
+    ConsensusUDP,
+    ConsensusEnc,
+    ConsensusDec,
+    ConsensusResolver,
+    ConsensusEpochs,
+    ConsensusMsgAuthN,
+    PeerHash,
+    PeerSessAuth,
+    PeerMsgAuth,
+    PeerProtoAuth,
+    PeerUnix,
+    PeerUDP,
+    PeerIDs,
+    PeerEpochs
+> where
+    RoundIDs: Default,
+    Proto: Default,
+    Hash: Default,
+    ConsensusResolver: Default,
+    ConsensusEpochs: Default,
+    ConsensusUnix: Default,
+    ConsensusUDP: Default,
+    ConsensusEnc: Default,
+    ConsensusDec: Default,
+    PeerHash: Default,
+    PeerUnix: Default,
+    PeerUDP: Default,
+    PeerIDs: Default,
+    PeerEpochs: Default {
     /// Name cache configuration.
     #[serde(default)]
     name_caches: ThreadedNSNameCachesConfig,
     /// Core consensus engine configuration.
     consensus: ConsensusComponentConfig<
+        RoundIDs,
+        Proto,
         String,
-        (),
-        PBFTConfig,
-        CompoundFarChannelConfig,
-        ThreadedFlowsParams,
-        ChannelRegistryChannelsConfig<
-            <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
-        >,
-        <AscendingCount<u128> as IDGen>::Config,
-        LargeObjProtoConfig<(), ()>,
-        TestAuthNConfig<String, TestCredConfig>,
-        CompoundXfrmCreateParam<(), ()>,
-        CompoundFarEndpoint
+        Hash,
+        ConsensusAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusEnc,
+        ConsensusDec,
+        ConsensusResolver,
+        ConsensusEpochs,
+        ConsensusMsgAuthN,
+        PeerHash,
+        PeerSessAuth,
+        PeerMsgAuth,
+        PeerProtoAuth,
+        PeerUnix,
+        PeerUDP,
+        PeerIDs,
+        PeerEpochs
     >
 }
 
 #[cfg(feature = "standalone")]
-impl StandaloneConfig {
+impl<
+    RoundIDs,
+    Proto,
+    Hash,
+    ConsensusAuthN,
+    ConsensusUnix,
+    ConsensusUDP,
+    ConsensusEnc,
+    ConsensusDec,
+    ConsensusResolver,
+    ConsensusEpochs,
+    ConsensusMsgAuthN,
+    PeerHash,
+    PeerSessAuth,
+    PeerMsgAuth,
+    PeerProtoAuth,
+    PeerUnix,
+    PeerUDP,
+    PeerIDs,
+    PeerEpochs
+> StandaloneConfig<
+    RoundIDs,
+    Proto,
+    Hash,
+    ConsensusAuthN,
+    ConsensusUnix,
+    ConsensusUDP,
+    ConsensusEnc,
+    ConsensusDec,
+    ConsensusResolver,
+    ConsensusEpochs,
+    ConsensusMsgAuthN,
+    PeerHash,
+    PeerSessAuth,
+    PeerMsgAuth,
+    PeerProtoAuth,
+    PeerUnix,
+    PeerUDP,
+    PeerIDs,
+    PeerEpochs
+> where
+    RoundIDs: Default,
+    Proto: Default,
+    Hash: Default,
+    ConsensusResolver: Default,
+    ConsensusEpochs: Default,
+    ConsensusUnix: Default,
+    ConsensusUDP: Default,
+    ConsensusEnc: Default,
+    ConsensusDec: Default,
+    PeerHash: Default,
+    PeerUnix: Default,
+    PeerUDP: Default,
+    PeerIDs: Default,
+    PeerEpochs: Default {
+
     #[inline]
     pub fn consensus(
         &self
     ) -> &ConsensusComponentConfig<
+        RoundIDs,
+        Proto,
         String,
-        (),
-        PBFTConfig,
-        CompoundFarChannelConfig,
-        ThreadedFlowsParams,
-        ChannelRegistryChannelsConfig<
-            <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
-        >,
-        <AscendingCount<u128> as IDGen>::Config,
-        LargeObjProtoConfig<(), ()>,
-        TestAuthNConfig<String, TestCredConfig>,
-        CompoundXfrmCreateParam<(), ()>,
-        CompoundFarEndpoint
+        Hash,
+        ConsensusAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusEnc,
+        ConsensusDec,
+        ConsensusResolver,
+        ConsensusEpochs,
+        ConsensusMsgAuthN,
+        PeerHash,
+        PeerSessAuth,
+        PeerMsgAuth,
+        PeerProtoAuth,
+        PeerUnix,
+        PeerUDP,
+        PeerIDs,
+        PeerEpochs
     > {
         &self.consensus
     }
@@ -318,19 +420,26 @@ impl StandaloneConfig {
     ) -> (
         ThreadedNSNameCachesConfig,
         ConsensusComponentConfig<
+            RoundIDs,
+            Proto,
             String,
-            (),
-            PBFTConfig,
-            CompoundFarChannelConfig,
-            ThreadedFlowsParams,
-            ChannelRegistryChannelsConfig<
-                <PBFTMsgPERCodec as Codec<PbftMsg>>::Param
-            >,
-            <AscendingCount<u128> as IDGen>::Config,
-            LargeObjProtoConfig<(), ()>,
-            TestAuthNConfig<String, TestCredConfig>,
-            CompoundXfrmCreateParam<(), ()>,
-            CompoundFarEndpoint
+            Hash,
+            ConsensusAuthN,
+            ConsensusUnix,
+            ConsensusUDP,
+            ConsensusEnc,
+            ConsensusDec,
+            ConsensusResolver,
+            ConsensusEpochs,
+            ConsensusMsgAuthN,
+            PeerHash,
+            PeerSessAuth,
+            PeerMsgAuth,
+            PeerProtoAuth,
+            PeerUnix,
+            PeerUDP,
+            PeerIDs,
+            PeerEpochs
         >
     ) {
         (self.name_caches, self.consensus)
@@ -450,4 +559,3 @@ impl StandaloneConfig {
 //
 // assert_eq!(expected, actual);
 // }
-*/
