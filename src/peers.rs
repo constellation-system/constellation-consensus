@@ -138,7 +138,7 @@ impl Drop for PeerSession {
     }
 }
 
-struct PeerSessionDispatchTypes<IDTypes, ProtoTypes, Types>
+pub struct PeerSessionDispatchTypes<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
@@ -497,7 +497,7 @@ where
 }
 
 impl<IDTypes, ProtoTypes, Types> SessionDispatchTypes
-     for PeerSessionDispatch<IDTypes, ProtoTypes, Types>
+     for PeerSessionDispatchTypes<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + Send,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
@@ -511,7 +511,7 @@ where
 }
 
 impl<IDTypes, ProtoTypes, Types>
-    SessionDispatch<PeerSessionDispatch<IDTypes, ProtoTypes, Types>>
+    SessionDispatch<PeerSessionDispatchTypes<IDTypes, ProtoTypes, Types>>
     for PeerSessionDispatch<IDTypes, ProtoTypes, Types>
 where
     IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + Send,
@@ -522,8 +522,8 @@ where
     Types::Hash: Send {
     type SessionError = PeerSessionDispatchError<
         Types::PeerPrin,
-        Types::CtlCodecCreateError,
-        Types::CtlCodecCreateError,
+        Types::SealCodecCreateError,
+        Types::SealCodecCreateError,
         Types::IDsCreateError
     >;
 

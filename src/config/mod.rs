@@ -16,28 +16,9 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-use constellation_auth::config::TestAuthNConfig;
-use constellation_auth::config::TestCredConfig;
-use constellation_channels::config::CompoundFarChannelConfig;
-use constellation_channels::config::CompoundFarEndpoint;
-use constellation_channels::config::CompoundXfrmCreateParam;
-use constellation_channels::config::ThreadedFlowsParams;
 use constellation_channels::config::ThreadedNSNameCachesConfig;
-#[cfg(feature = "standalone")]
-use constellation_common::codec::Decoder;
-#[cfg(feature = "standalone")]
-use constellation_common::codec::Encoder;
-#[cfg(feature = "standalone")]
-use constellation_common::ids::AscendingCount;
 use constellation_component_common::config::DispatchLargeObjBusConfig;
 use constellation_component_common::config::MulticastDatagramBusConfig;
-#[cfg(feature = "standalone")]
-use constellation_pbft::config::PBFTConfig;
-#[cfg(feature = "standalone")]
-use constellation_pbft::msgs::PBFTMsgPERCodec;
-#[cfg(feature = "standalone")]
-use constellation_pbft::msgs::PbftMsg;
-use constellation_streams::config::LargeObjProtoConfig;
 use serde::Deserialize;
 use serde::Serialize;
 

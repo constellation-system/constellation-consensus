@@ -16,6 +16,8 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+#[cfg(feature = "standalone")]
+use std::convert::Infallible;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
@@ -595,4 +597,379 @@ where Types: ConsensusTypes<Prin = String,
                    "error shutting down name chache threads")
         }
     }
+}
+
+#[cfg(feature = "standalone")]
+use std::net::SocketAddr;
+
+#[cfg(feature = "standalone")]
+use constellation_auth::authn::BasicAuthNed;
+#[cfg(feature = "standalone")]
+use constellation_auth::authn::PassthruMsgAuthN;
+#[cfg(feature = "standalone")]
+use constellation_auth::authn::basic::BasicAuthN;
+#[cfg(feature = "standalone")]
+use constellation_auth::config::BasicAuthNConfig;
+#[cfg(feature = "standalone")]
+use constellation_channels::config::CompoundFarEndpoint;
+#[cfg(feature = "standalone")]
+use constellation_channels::config::CompoundFarChannelXfrmPeerAddr;
+#[cfg(feature = "standalone")]
+use constellation_channels::config::ResolverConfig;
+#[cfg(feature = "standalone")]
+use constellation_channels::far::compound::CompoundFlow;
+#[cfg(feature = "standalone")]
+use constellation_channels::far::types::CompoundFarChannelsBasicAuthNedDatagramChan;
+#[cfg(feature = "standalone")]
+use constellation_channels::far::types::CompoundFarChannelsBasicAuthNedLargeObjChan;
+#[cfg(feature = "standalone")]
+use constellation_channels::resolve::MixedResolver;
+#[cfg(feature = "standalone")]
+use constellation_common::codec::test::TestDecodeError;
+#[cfg(feature = "standalone")]
+use constellation_common::hashid::SHA3Algo;
+#[cfg(feature = "standalone")]
+use constellation_common::hashid::SHA3ID;
+#[cfg(feature = "standalone")]
+use constellation_common::codec::test::TestStringCodec;
+#[cfg(feature = "standalone")]
+use constellation_common::codec::test::TooShort;
+#[cfg(feature = "standalone")]
+use constellation_common::ids::AscendingCount;
+#[cfg(feature = "standalone")]
+use constellation_common::net::PassthruDatagramXfrm;
+#[cfg(feature = "standalone")]
+use constellation_common::net::PassthruDatagramXfrmParam;
+#[cfg(feature = "standalone")]
+use constellation_common::unix::UnixSocketPath;
+#[cfg(feature = "standalone")]
+use constellation_component_common::consensus_ctl::ConsensusCtl;
+#[cfg(feature = "standalone")]
+use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
+#[cfg(feature = "standalone")]
+use constellation_component_common::consensus_ctl::ConsensusCtlRoundEncodeError;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::parties::PartyTypes;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::parties::RoundPartyIDTypes;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::parties::RoundPartyIdxTypes;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::parties::RoundIDGenTypes;
+#[cfg(feature = "standalone")]
+use constellation_component_common::bus::types::DispatchLargeObjBusTypes;
+#[cfg(feature = "standalone")]
+use constellation_component_common::bus::types::MulticastDatagramBusTypes;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::round::SingleRound;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::round::SingleRoundAdvanceError;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::round::SingleRoundCreateError;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::round::SingleRoundSubmitError;
+#[cfg(feature = "standalone")]
+use constellation_component_common::xact::test::TestSeal;
+#[cfg(feature = "standalone")]
+use constellation_component_common::xact::test::TestSealCodec;
+#[cfg(feature = "standalone")]
+use constellation_pbft::config::PBFTConfig;
+#[cfg(feature = "standalone")]
+use constellation_pbft::msgs::PbftMsg;
+#[cfg(feature = "standalone")]
+use constellation_pbft::msgs::PBFTMsgPERCodec;
+#[cfg(feature = "standalone")]
+use constellation_pbft::msgs::PbftRequest;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTRoundResult;
+#[cfg(feature = "standalone")]
+use constellation_pbft::proto::PBFTProto;
+#[cfg(feature = "standalone")]
+use constellation_pbft::proto::OutboundPartyIdx;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTBatchError;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTProtoTypes;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTProtoState;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTProtoStateUpdateError;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTRoundState;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTRoundStateCreateError;
+#[cfg(feature = "standalone")]
+use constellation_streams::large_obj::LargeObjID;
+#[cfg(feature = "standalone")]
+use constellation_streams::large_obj::LargeObjMsg;
+
+#[cfg(feature = "standalone")]
+use crate::peers::PeerSessionDispatchTypes;
+#[cfg(feature = "standalone")]
+use crate::peers::PeerSessionMsgs;
+#[cfg(feature = "standalone")]
+use crate::peers::PeerSessionRecv;
+#[cfg(feature = "standalone")]
+use crate::peers::PeerSessionRecvError;
+#[cfg(feature = "standalone")]
+use crate::types::ConsensusBaseTypes;
+#[cfg(feature = "standalone")]
+use crate::types::ConsensusMsgTypes;
+#[cfg(feature = "standalone")]
+use crate::types::ConsensusPeerTypes;
+#[cfg(feature = "standalone")]
+use crate::types::ConsensusRecvTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandaloneConsensusTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandaloneConsensusBusTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandalonePeerBusTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandalonePBFTIDTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandalonePBFTTypes;
+
+#[cfg(feature = "standalone")]
+pub type StandaloneConsensusComponent =
+    ConsensusComponent<StandaloneConsensusTypes>;
+
+#[cfg(feature = "standalone")]
+impl RoundPartyIDTypes for StandalonePBFTIDTypes {
+    type PartyID = MulticastStreamIdx;
+    type RoundID = u128;
+}
+
+#[cfg(feature = "standalone")]
+impl RoundPartyIdxTypes for StandalonePBFTIDTypes {
+    type PartyRoundIdx = OutboundPartyIdx;
+}
+
+#[cfg(feature = "standalone")]
+impl RoundIDGenTypes for StandalonePBFTIDTypes {
+    type RoundIDs = AscendingCount<u128>;
+}
+
+#[cfg(feature = "standalone")]
+impl PartyTypes for StandalonePBFTIDTypes {
+    type Party = String;
+    type PartyCodec = TestStringCodec;
+    type DecodeError = TestDecodeError;
+    type EncodeError = TooShort;
+}
+
+#[cfg(feature = "standalone")]
+impl ConsensusBaseTypes for StandaloneConsensusTypes {
+    type HashID = SHA3ID;
+    type Hash = SHA3Algo;
+    type HashConfig = ();
+    type HashCreateError = Infallible;
+    type BatchError = PBFTBatchError;
+    type Oper = PBFTRoundResult<PbftRequest>;
+    type Seal = TestSeal;
+    type SealCodec = TestSealCodec;
+    type SealCodecCreateError = Infallible;
+    type SealCodecParam = ();
+}
+
+#[cfg(feature = "standalone")]
+impl ConsensusMsgTypes<StandalonePBFTIDTypes, PBFTProtoTypes>
+    for StandaloneConsensusTypes {
+    type Prin = String;
+    type AuthNMsg = BasicAuthNed<String, PbftMsg>;
+}
+
+#[cfg(feature = "standalone")]
+impl ConsensusRecvTypes<StandalonePBFTIDTypes, PBFTProtoTypes>
+    for StandaloneConsensusTypes {
+    type SubmitError = SingleRoundSubmitError<Infallible, Infallible>;
+    type AdvanceError = SingleRoundAdvanceError<
+        PBFTRoundStateCreateError<MulticastStreamIdx>
+    >;
+    type UpdateError = PBFTProtoStateUpdateError<SHA3ID>;
+    type Rounds = SingleRound<PBFTProtoState<SHA3Algo, MulticastStreamIdx>,
+                              StandalonePBFTIDTypes, PBFTProtoTypes>;
+}
+
+#[cfg(feature = "standalone")]
+impl ConsensusPeerTypes<StandalonePBFTIDTypes, PBFTProtoTypes>
+    for StandaloneConsensusTypes {
+    type PeerPrin = String;
+    type IDsCreateError = Infallible;
+    type IDsConfig = ();
+    type IDs = AscendingCount<LargeObjID>;
+    type CtlAuthNMsg = BasicAuthNed<
+        String,
+        ConsensusCtl<u128, SHA3ID, TestSeal>
+    >;
+}
+
+#[cfg(feature = "standalone")]
+impl ConsensusTypes for StandaloneConsensusTypes {
+    type Ctx = StandaloneCtx;
+    type RoundID = u128;
+    type RoundIDs = AscendingCount<u128>;
+    type RoundIDsConfig = ();
+    type RoundIDsCreateError = Infallible;
+    type IDTypes = StandalonePBFTIDTypes;
+    type Msg = PbftMsg;
+    type ProtoTypes = PBFTProtoTypes;
+    type ConsensusEpochsConfig = ();
+    type ConsensusSessAuthConfig = BasicAuthNConfig<String>;
+    type ConsensusMsgAuthConfig = ();
+    type ConsensusUDPConfig = PassthruDatagramXfrmParam;
+    type ConsensusUnixConfig = PassthruDatagramXfrmParam;
+    type ConsensusEncoderConfig = ();
+    type ConsensusDecoderConfig = ();
+    type ConsensusBusTypes = StandaloneConsensusBusTypes;
+    type ConsensusConfig = PBFTConfig;
+    type ConsensusCreateError = Infallible;
+    type ConsensusRoundsError = SingleRoundCreateError<
+        Infallible,
+        PBFTRoundStateCreateError<MulticastStreamIdx>
+    >;
+    type Consensus = PBFTProto<SHA3Algo, StandalonePBFTIDTypes>;
+    type ResolverConfig = ResolverConfig;
+    type PeerHashConfig = ();
+    type PeerEpochsConfig = ();
+    type PeerProtoAuthConfig = ();
+    type PeerSessAuthConfig = BasicAuthNConfig<String>;
+    type PeerMsgAuthConfig = ();
+    type PeerUDPConfig = PassthruDatagramXfrmParam;
+    type PeerUnixConfig = PassthruDatagramXfrmParam;
+    type PeerBusTypes = StandalonePeerBusTypes;
+}
+
+#[cfg(feature = "standalone")]
+impl DispatchLargeObjBusTypes<StandaloneCtx> for StandalonePeerBusTypes {
+    type OutMsg = ConsensusCtl<u128, SHA3ID, TestSeal>;
+    type InMsg = ConsensusCtl<u128, SHA3ID, TestSeal>;
+    type Wrapper = ConsensusCtl<u128, SHA3ID, TestSeal>;
+    type MsgPrin = String;
+    type SessionPrin = String;
+    type AuthNMsg = BasicAuthNed<String, ConsensusCtl<u128, SHA3ID, TestSeal>>;
+    type Hash = SHA3Algo;
+    type HashID = SHA3ID;
+    type HashConfig = ();
+    type HashCreateError = Infallible;
+    type IDs = AscendingCount<LargeObjID>;
+    type IDsConfig = ();
+    type IDsCreateError = Infallible;
+    type LargeObjAuthNMsg = BasicAuthNed<String, LargeObjMsg<SHA3ID>>;
+    type LargeObjMsgAuth = PassthruMsgAuthN<LargeObjMsg<SHA3ID>, String>;
+    type LargeObjMsgAuthConfig = ();
+    type LargeObjMsgAuthCreateError = Infallible;
+    type LargeObjWrapper = LargeObjMsg<SHA3ID>;
+    type SessionAuth = BasicAuthN<String>;
+    type SessionAuthConfig = BasicAuthNConfig<String>;
+    type SessionAuthNError = Infallible;
+    type AuthNSession = BasicAuthNed<
+        String,
+        CompoundFlow<
+            PassthruDatagramXfrm<UnixSocketPath>,
+            PassthruDatagramXfrm<SocketAddr>
+        >
+    >;
+    type AuthNChan = CompoundFarChannelsBasicAuthNedLargeObjChan<
+        String,
+        SHA3Algo,
+        PassthruDatagramXfrm<UnixSocketPath>,
+        PassthruDatagramXfrm<SocketAddr>
+    >;
+    type MsgAuth = PassthruMsgAuthN<ConsensusCtl<u128, SHA3ID, TestSeal>, String>;
+    type MsgAuthConfig = ();
+    type MsgAuthError = Infallible;
+    type MsgAuthCreateError = Infallible;
+    type Encoder = ConsensusCtlCodec<u128, SHA3Algo, TestSeal, TestSealCodec>;
+    type EncoderConfig = ();
+    type EncodeError = ConsensusCtlRoundEncodeError<
+        asn1rs::io::per::err::Error,
+        Infallible
+    >;
+    type EncoderCreateError = Infallible;
+    type Decoder = ConsensusCtlCodec<u128, SHA3Algo, TestSeal, TestSealCodec>;
+    type DecoderConfig = ();
+    type DecoderCreateError = Infallible;
+    type Unix = PassthruDatagramXfrm<UnixSocketPath>;
+    type UnixConfig = PassthruDatagramXfrmParam;
+    type UnixError = Infallible;
+    type UDP = PassthruDatagramXfrm<SocketAddr>;
+    type UDPConfig = PassthruDatagramXfrmParam;
+    type UDPError = Infallible;
+    type Epoch = u128;
+    type Epochs = AscendingCount<u128>;
+    type EpochsConfig = ();
+    type EpochsCreateError = Infallible;
+    type Origin = CompoundFarEndpoint;
+    type Resolver =
+        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>;
+    type ResolverConfig = ResolverConfig;
+    type Msgs = PeerSessionMsgs<StandalonePBFTIDTypes, PBFTProtoTypes,
+                                StandaloneConsensusTypes>;
+    type Recv = PeerSessionRecv<StandalonePBFTIDTypes, PBFTProtoTypes,
+                                StandaloneConsensusTypes>;
+    type RecvError = PeerSessionRecvError<SHA3ID>;
+    type DispTypes = PeerSessionDispatchTypes<StandalonePBFTIDTypes,
+                                              PBFTProtoTypes,
+                                              StandaloneConsensusTypes>;
+}
+
+#[cfg(feature = "standalone")]
+impl MulticastDatagramBusTypes<StandaloneCtx> for StandaloneConsensusBusTypes {
+    type OutMsg = PbftMsg;
+    type InMsg = PbftMsg;
+    type Wrapper = PbftMsg;
+    type MsgPrin = String;
+    type SessionPrin = String;
+    type AuthNMsg = BasicAuthNed<String, PbftMsg>;
+    type SessionAuth = BasicAuthN<String>;
+    type SessionAuthConfig = BasicAuthNConfig<String>;
+    type SessionAuthNError = Infallible;
+    type AuthNSession = BasicAuthNed<
+        String,
+        CompoundFlow<
+            PassthruDatagramXfrm<UnixSocketPath>,
+            PassthruDatagramXfrm<SocketAddr>
+        >
+    >;
+    type AuthNChan = CompoundFarChannelsBasicAuthNedDatagramChan<
+        String,
+        PbftMsg,
+        PbftMsg,
+        PassthruDatagramXfrm<UnixSocketPath>,
+        PassthruDatagramXfrm<SocketAddr>,
+        PBFTMsgPERCodec,
+        PBFTMsgPERCodec
+    >;
+    type MsgAuth = PassthruMsgAuthN<PbftMsg, String>;
+    type MsgAuthConfig = ();
+    type Encoder = PBFTMsgPERCodec;
+    type EncoderConfig = ();
+    type EncodeError = asn1rs::io::per::err::Error;
+    type EncoderCreateError = Infallible;
+    type Decoder = PBFTMsgPERCodec;
+    type DecoderConfig = ();
+    type DecoderCreateError = Infallible;
+    type Unix = PassthruDatagramXfrm<UnixSocketPath>;
+    type UnixConfig = PassthruDatagramXfrmParam;
+    type UnixError = Infallible;
+    type UDP = PassthruDatagramXfrm<SocketAddr>;
+    type UDPConfig = PassthruDatagramXfrmParam;
+    type UDPError = Infallible;
+    type Epoch = u128;
+    type Epochs = AscendingCount<u128>;
+    type EpochsConfig = ();
+    type Origin = CompoundFarEndpoint;
+    type Resolver =
+        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>;
+    type ResolverConfig = ResolverConfig;
+    type Recv = ConsensusAuthNRecv<StandalonePBFTIDTypes, PBFTProtoTypes,
+                                   StandaloneConsensusTypes>;
+    type Msgs = State<StandalonePBFTIDTypes, PBFTProtoTypes,
+                      StandaloneConsensusTypes>;
 }

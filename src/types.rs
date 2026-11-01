@@ -16,7 +16,6 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-use std::convert::Infallible;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -31,10 +30,7 @@ use constellation_common::config::CreateWithParam;
 use constellation_common::error::ScopedError;
 use constellation_common::hashid::HashAlgo;
 use constellation_common::hashid::HashID;
-use constellation_common::hashid::SHA3Algo;
-use constellation_common::hashid::SHA3ID;
 use constellation_common::net::SharedMsgs;
-use constellation_component_common::bus::types::SessionDispatchTypes;
 use constellation_component_common::bus::types::DispatchLargeObjBusTypes;
 use constellation_component_common::bus::types::MulticastDatagramBusTypes;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
@@ -56,9 +52,7 @@ use constellation_streams::multicast::MulticastStreamIdx;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::peers::PeerSessionDispatch;
-use crate::peers::PeerSessionMsgs;
-use crate::peers::PeerSessionRecv;
+use crate::peers::PeerSessionDispatchTypes;
 use crate::recv::ConsensusAuthNRecv;
 use crate::state::State;
 
@@ -76,7 +70,9 @@ pub trait ConsensusBaseTypes {
         > + Send;
     type Seal: Clone + Send;
     type SealCodec: Clone + Decoder<Self::Seal> + Encoder<Self::Seal>
-        + CreateWithParam<Self::SealCodecParam>;
+        + CreateWithParam<Self::SealCodecParam,
+                          CreateError = Self::SealCodecCreateError>;
+    type SealCodecCreateError: Debug + Display + ScopedError;
     type SealCodecParam: Clone + Default;
 }
 
@@ -127,34 +123,12 @@ where
             Self::Prin,
             ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>
         >;
-    type CtlCodecCreateError: Debug + Display + ScopedError;
-    type CtlCodec: Clone + Create<CreateError = Self::CtlCodecCreateError>
-        + Decoder<ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>>
-        + Encoder<ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>>;
-}
-
-pub trait ConsensusPeerSessionDispatchTypes<IDTypes, ProtoTypes>:
-    ConsensusPeerTypes<IDTypes, ProtoTypes>
-    + ConsensusRecvTypes<IDTypes, ProtoTypes> + Sized
-where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
-    IDTypes::RoundID: From<u128> + Into<u128> + Send,
-    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> {
-    type SessionDispTypes: SessionDispatchTypes<
-        SessionPrin = Self::PeerPrin,
-        Msgs = PeerSessionMsgs<IDTypes, ProtoTypes, Self>,
-        Recv = PeerSessionRecv<IDTypes, ProtoTypes, Self>
-    >;
 }
 
 pub trait ConsensusTypes:
-    ConsensusPeerSessionDispatchTypes<Self::IDTypes, Self::ProtoTypes> {
+    ConsensusPeerTypes<Self::IDTypes, Self::ProtoTypes>
+    + ConsensusRecvTypes<Self::IDTypes, Self::ProtoTypes> + Sized {
     type Ctx: 'static + Clone + NSNameCachesCtx + Send;
-    type Addr: Clone + Debug + Display + Eq + Hash + Send;
-    type PrinCodecConfig: Default;
-    type PrinCodec: Decoder<Self::Prin>
-        + Encoder<Self::Prin>
-        + Create<Config = Self::PrinCodecConfig>;
     type RoundID: Clone + Debug + Display + From<u128> + Into<u128> + Ord + Send;
     type RoundIDsConfig: Default + for<'a> Deserialize<'a> + Serialize;
     type RoundIDsCreateError: Debug + Display;
@@ -176,7 +150,8 @@ pub trait ConsensusTypes:
     type ConsensusMsgAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
     type ConsensusUDPConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
     type ConsensusUnixConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type ConsensusChansConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
+    type ConsensusEncoderConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type ConsensusDecoderConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
     type ConsensusBusTypes: MulticastDatagramBusTypes<
         Self::Ctx,
         // XXX This might be overly restrictive
@@ -195,8 +170,6 @@ pub trait ConsensusTypes:
         Recv = ConsensusAuthNRecv<Self::IDTypes, Self::ProtoTypes, Self>,
         Msgs = State<Self::IDTypes, Self::ProtoTypes, Self>
     >;
-    type ConsensusEncoderConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type ConsensusDecoderConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
     type ConsensusConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
     type ConsensusCreateError: Debug + Display;
     type ConsensusRoundsError: Debug + Display;
@@ -232,117 +205,6 @@ pub trait ConsensusTypes:
         MsgAuthConfig = Self::PeerMsgAuthConfig,
         SessionAuthConfig = Self::PeerSessAuthConfig,
         LargeObjMsgAuthConfig = Self::PeerProtoAuthConfig,
-        DispTypes = PeerSessionDispatch<Self::IDTypes, Self::ProtoTypes, Self>
+        DispTypes = PeerSessionDispatchTypes<Self::IDTypes, Self::ProtoTypes, Self>
     >;
-}
-
-#[cfg(feature = "standalone")]
-use constellation_auth::authn::BasicAuthNed;
-#[cfg(feature = "standalone")]
-use constellation_common::codec::test::TestDecodeError;
-#[cfg(feature = "standalone")]
-use constellation_common::codec::test::TestStringCodec;
-#[cfg(feature = "standalone")]
-use constellation_common::codec::test::TooShort;
-#[cfg(feature = "standalone")]
-use constellation_common::ids::AscendingCount;
-#[cfg(feature = "standalone")]
-use constellation_component_common::xact::test::TestSeal;
-#[cfg(feature = "standalone")]
-use constellation_component_common::xact::test::TestSealCodec;
-#[cfg(feature = "standalone")]
-use constellation_consensus_common::round::SingleRound;
-#[cfg(feature = "standalone")]
-use constellation_consensus_common::round::SingleRoundSubmitError;
-#[cfg(feature = "standalone")]
-use constellation_consensus_common::round::SingleRoundAdvanceError;
-#[cfg(feature = "standalone")]
-use constellation_pbft::msgs::PbftMsg;
-#[cfg(feature = "standalone")]
-use constellation_pbft::msgs::PbftRequest;
-#[cfg(feature = "standalone")]
-use constellation_pbft::state::PBFTRoundResult;
-#[cfg(feature = "standalone")]
-use constellation_pbft::proto::PBFTProto;
-#[cfg(feature = "standalone")]
-use constellation_pbft::proto::OutboundPartyIdx;
-#[cfg(feature = "standalone")]
-use constellation_pbft::state::PBFTBatchError;
-#[cfg(feature = "standalone")]
-use constellation_pbft::state::PBFTProtoTypes;
-#[cfg(feature = "standalone")]
-use constellation_pbft::state::PBFTProtoState;
-#[cfg(feature = "standalone")]
-use constellation_pbft::state::PBFTProtoStateUpdateError;
-#[cfg(feature = "standalone")]
-use constellation_pbft::state::PBFTRoundState;
-#[cfg(feature = "standalone")]
-use constellation_pbft::state::PBFTRoundStateCreateError;
-
-#[cfg(feature = "standalone")]
-pub struct StandaloneConsensusTypes;
-
-#[cfg(feature = "standalone")]
-pub struct StandalonePBFTTypes;
-
-#[cfg(feature = "standalone")]
-type StandalonePBFTProto = PBFTProto<SHA3Algo, StandalonePBFTTypes>;
-
-#[cfg(feature = "standalone")]
-type StandalonePBFTRoundState = PBFTRoundState<SHA3Algo, PbftRequest>;
-
-#[cfg(feature = "standalone")]
-impl RoundPartyIDTypes for StandalonePBFTTypes {
-    type PartyID = MulticastStreamIdx;
-    type RoundID = u128;
-}
-
-#[cfg(feature = "standalone")]
-impl RoundPartyIdxTypes for StandalonePBFTTypes {
-    type PartyRoundIdx = OutboundPartyIdx;
-}
-
-#[cfg(feature = "standalone")]
-impl RoundIDGenTypes for StandalonePBFTTypes {
-    type RoundIDs = AscendingCount<u128>;
-}
-
-#[cfg(feature = "standalone")]
-impl PartyTypes for StandalonePBFTTypes {
-    type Party = String;
-    type PartyCodec = TestStringCodec;
-    type DecodeError = TestDecodeError;
-    type EncodeError = TooShort;
-}
-
-#[cfg(feature = "standalone")]
-impl ConsensusBaseTypes for StandaloneConsensusTypes {
-    type HashID = SHA3ID;
-    type Hash = SHA3Algo;
-    type HashConfig = ();
-    type HashCreateError = Infallible;
-    type BatchError = PBFTBatchError;
-    type Oper = PBFTRoundResult<PbftRequest>;
-    type Seal = TestSeal;
-    type SealCodec = TestSealCodec;
-    type SealCodecParam = ();
-}
-
-#[cfg(feature = "standalone")]
-impl ConsensusMsgTypes<StandalonePBFTTypes, PBFTProtoTypes>
-    for StandaloneConsensusTypes {
-    type Prin = String;
-    type AuthNMsg = BasicAuthNed<String, PbftMsg>;
-}
-
-#[cfg(feature = "standalone")]
-impl ConsensusRecvTypes<StandalonePBFTTypes, PBFTProtoTypes>
-    for StandaloneConsensusTypes {
-    type SubmitError = SingleRoundSubmitError<Infallible, Infallible>;
-    type AdvanceError = SingleRoundAdvanceError<
-        PBFTRoundStateCreateError<MulticastStreamIdx>
-    >;
-    type UpdateError = PBFTProtoStateUpdateError<SHA3ID>;
-    type Rounds = SingleRound<PBFTProtoState<SHA3Algo, MulticastStreamIdx>,
-                              StandalonePBFTTypes, PBFTProtoTypes>;
 }

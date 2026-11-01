@@ -17,9 +17,9 @@
 // <https://www.gnu.org/licenses/>.
 
 //! Standalone consensus component.
-use constellation_consensus::component::CompoundConsensusComponent;
+use constellation_consensus::component::StandaloneConsensusComponent;
 use constellation_standalone::StandaloneService;
 
 fn main() {
-    CompoundConsensusComponent::main()
+    StandaloneConsensusComponent::main()
 }
