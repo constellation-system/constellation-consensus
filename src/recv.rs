@@ -24,26 +24,30 @@ use std::io::Error;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::mpsc::Sender;
 use std::sync::mpsc::SendError;
+use std::sync::mpsc::Sender;
 
-use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
+use constellation_auth::authn::AuthNedDestruct;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::MutexPoison;
 use constellation_common::error::ScopedError;
 use constellation_common::sync::Notify;
+use constellation_consensus_common::parties::PartyTypes;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
 use constellation_streams::multicast::MulticastStreamIdx;
 use log::error;
 use log::warn;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::types::ConsensusRecvTypes;
 
 pub struct ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
@@ -51,30 +55,28 @@ where
     party_types: PhantomData<IDTypes>,
     proto_types: PhantomData<ProtoTypes>,
     types: PhantomData<Types>,
-    prins: Arc<RwLock<HashMap<Types::Prin, MulticastStreamIdx>>>,
+    prins: Arc<RwLock<HashMap<IDTypes::Party, MulticastStreamIdx>>>,
     send: Sender<(MulticastStreamIdx, ProtoTypes::Msg)>,
-    notify: Notify,
+    notify: Notify
 }
 
 #[derive(Debug)]
 pub enum RecvMsgError<Msg> {
-    Send {
-        err: SendError<Msg>
-    },
-    Notify {
-        err: Error
-    },
+    Send { err: SendError<Msg> },
+    Notify { err: Error },
     MutexPoison
 }
 
 impl<IDTypes, ProtoTypes, Types> Clone
     for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
-    Types::Hash: Send {
+    Types::Hash: Send
+{
     #[inline]
     fn clone(&self) -> Self {
         ConsensusAuthNRecv {
@@ -88,14 +90,15 @@ where
     }
 }
 
-impl<IDTypes, ProtoTypes, Types>
-    ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
+impl<IDTypes, ProtoTypes, Types> ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
-    Types::Hash: Send {
+    Types::Hash: Send
+{
     #[inline]
     pub(crate) fn create(
         send: Sender<(MulticastStreamIdx, ProtoTypes::Msg)>,
@@ -117,7 +120,7 @@ where
         prins: I
     ) -> Result<(), MutexPoison>
     where
-        I: Iterator<Item = (MulticastStreamIdx, Types::Prin)> {
+        I: Iterator<Item = (MulticastStreamIdx, IDTypes::Party)> {
         let mut guard = self.prins.write().map_err(|_| MutexPoison)?;
 
         *guard = prins.map(|(a, b)| (b, a)).collect();
@@ -126,14 +129,16 @@ where
     }
 }
 
-impl<IDTypes, ProtoTypes, Types> Drop for
-    ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
+impl<IDTypes, ProtoTypes, Types> Drop
+    for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
-    Types::Hash: Send {
+    Types::Hash: Send
+{
     fn drop(&mut self) {
         if let Err(err) = self.notify.notify() {
             error!(target: "consensus-recv-authn-msg",
@@ -143,16 +148,17 @@ where
     }
 }
 
-impl<IDTypes, ProtoTypes, Types>
-    AuthNMsgRecv<Types::Prin, Types::AuthNMsg>
+impl<IDTypes, ProtoTypes, Types> AuthNMsgRecv<IDTypes::Party, Types::AuthNMsg>
     for ConsensusAuthNRecv<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Debug,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
-    Types::Hash: Send {
+    Types::Hash: Send
+{
     type RecvError = RecvMsgError<(MulticastStreamIdx, ProtoTypes::Msg)>;
 
     /// Receive an authenticated message.
@@ -165,9 +171,11 @@ where
 
         match guard.get(&prin) {
             Some(party) => {
-                self.send.send((party.clone(), msg))
+                self.send
+                    .send((party.clone(), msg))
                     .map_err(|err| RecvMsgError::Send { err: err })?;
-                self.notify.notify()
+                self.notify
+                    .notify()
                     .map_err(|err| RecvMsgError::Notify { err: err })
             }
             None => {
@@ -199,7 +207,7 @@ impl<Msg> Display for RecvMsgError<Msg> {
         match self {
             RecvMsgError::Send { err } => write!(f, "{}", err),
             RecvMsgError::Notify { err } => write!(f, "{}", err),
-            RecvMsgError::MutexPoison => write!(f, "mutex poisoned"),
+            RecvMsgError::MutexPoison => write!(f, "mutex poisoned")
         }
     }
 }

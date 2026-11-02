@@ -78,7 +78,7 @@ pub struct ConsensusComponentConfig<
         ConsensusDec,
         ConsensusResolver,
         ConsensusEpochs,
-        ConsensusMsgAuthN,
+        ConsensusMsgAuthN
     >,
     peers: DispatchLargeObjBusConfig<
         PeerHash,
@@ -115,28 +115,30 @@ impl<
     PeerUDP,
     PeerIDs,
     PeerEpochs
-> ConsensusComponentConfig<
-    RoundIDs,
-    Proto,
-    PartyID,
-    Hash,
-    ConsensusAuthN,
-    ConsensusUnix,
-    ConsensusUDP,
-    ConsensusEnc,
-    ConsensusDec,
-    ConsensusResolver,
-    ConsensusEpochs,
-    ConsensusMsgAuthN,
-    PeerHash,
-    PeerSessAuth,
-    PeerMsgAuth,
-    PeerProtoAuth,
-    PeerUnix,
-    PeerUDP,
-    PeerIDs,
-    PeerEpochs
-> where
+>
+    ConsensusComponentConfig<
+        RoundIDs,
+        Proto,
+        PartyID,
+        Hash,
+        ConsensusAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusEnc,
+        ConsensusDec,
+        ConsensusResolver,
+        ConsensusEpochs,
+        ConsensusMsgAuthN,
+        PeerHash,
+        PeerSessAuth,
+        PeerMsgAuth,
+        PeerProtoAuth,
+        PeerUnix,
+        PeerUDP,
+        PeerIDs,
+        PeerEpochs
+    >
+where
     RoundIDs: Default,
     Proto: Default,
     Hash: Default,
@@ -150,7 +152,8 @@ impl<
     PeerUnix: Default,
     PeerUDP: Default,
     PeerIDs: Default,
-    PeerEpochs: Default {
+    PeerEpochs: Default
+{
     #[inline]
     pub fn multicast(
         &self
@@ -163,7 +166,7 @@ impl<
         ConsensusDec,
         ConsensusResolver,
         ConsensusEpochs,
-        ConsensusMsgAuthN,
+        ConsensusMsgAuthN
     > {
         &self.multicast
     }
@@ -217,7 +220,7 @@ impl<
             ConsensusDec,
             ConsensusResolver,
             ConsensusEpochs,
-            ConsensusMsgAuthN,
+            ConsensusMsgAuthN
         >,
         DispatchLargeObjBusConfig<
             PeerHash,
@@ -232,7 +235,13 @@ impl<
             PeerEpochs
         >
     ) {
-        (self.round_ids, self.hash, self.proto, self.multicast, self.peers)
+        (
+            self.round_ids,
+            self.hash,
+            self.proto,
+            self.multicast,
+            self.peers
+        )
     }
 }
 
@@ -330,27 +339,29 @@ impl<
     PeerUDP,
     PeerIDs,
     PeerEpochs
-> StandaloneConfig<
-    RoundIDs,
-    Proto,
-    Hash,
-    ConsensusAuthN,
-    ConsensusUnix,
-    ConsensusUDP,
-    ConsensusEnc,
-    ConsensusDec,
-    ConsensusResolver,
-    ConsensusEpochs,
-    ConsensusMsgAuthN,
-    PeerHash,
-    PeerSessAuth,
-    PeerMsgAuth,
-    PeerProtoAuth,
-    PeerUnix,
-    PeerUDP,
-    PeerIDs,
-    PeerEpochs
-> where
+>
+    StandaloneConfig<
+        RoundIDs,
+        Proto,
+        Hash,
+        ConsensusAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusEnc,
+        ConsensusDec,
+        ConsensusResolver,
+        ConsensusEpochs,
+        ConsensusMsgAuthN,
+        PeerHash,
+        PeerSessAuth,
+        PeerMsgAuth,
+        PeerProtoAuth,
+        PeerUnix,
+        PeerUDP,
+        PeerIDs,
+        PeerEpochs
+    >
+where
     RoundIDs: Default,
     Proto: Default,
     Hash: Default,
@@ -364,8 +375,8 @@ impl<
     PeerUnix: Default,
     PeerUDP: Default,
     PeerIDs: Default,
-    PeerEpochs: Default {
-
+    PeerEpochs: Default
+{
     #[inline]
     pub fn consensus(
         &self

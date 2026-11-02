@@ -20,20 +20,20 @@ use std::collections::HashSet;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
-use std::sync::mpsc::channel;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::TryRecvError;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::mpsc::channel;
 use std::thread::Builder;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use constellation_common::error::WithMutexPoison;
 use constellation_common::net::SharedMsgs;
-use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::retry::next_retry;
+use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
 use constellation_component_common::consensus_ctl::ConsensusCtlRound;
 use constellation_consensus_common::oper::OperBatch;
@@ -55,6 +55,8 @@ use mio::Events;
 use mio::Poll;
 use mio::Token;
 use mio::Waker;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::peers::PeerSessionState;
 use crate::types::ConsensusPeerTypes;
@@ -64,7 +66,9 @@ const WAKER_TOKEN: Token = Token(0);
 
 pub struct State<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes:
+        RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Send,
@@ -72,12 +76,14 @@ where
     Types::Hash: Send {
     // XXX it should be possible to separate out the outbound mailbox
     // and just use that.
-    rounds: Arc<Mutex<Types::Rounds>>,
+    rounds: Arc<Mutex<Types::Rounds>>
 }
 
 pub(crate) struct StateThread<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes:
+        RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Send,
@@ -98,7 +104,7 @@ where
 }
 
 #[derive(Debug)]
-pub(crate) enum StateInitRoundsError<Parties, Advance> {
+pub enum StateInitRoundsError<Parties, Advance> {
     Parties { err: Parties },
     Advance { err: Advance },
     MutexPoison
@@ -116,22 +122,21 @@ enum StateRecvError<Recv, Update, Batch, Advance> {
 
 #[derive(Debug)]
 enum WithIOError<Inner> {
-    Inner {
-        err: Inner
-    },
-    IO {
-        err: std::io::Error
-    }
+    Inner { err: Inner },
+    IO { err: std::io::Error }
 }
 
 impl<IDTypes, ProtoTypes, Types> Clone for State<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes:
+        RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Send,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
-    Types::Hash: Send {
+    Types::Hash: Send
+{
     #[inline]
     fn clone(&self) -> Self {
         State {
@@ -143,14 +148,17 @@ where
 impl<IDTypes, ProtoTypes, Types, Msg> SharedMsgs<MulticastStreamIdx, Msg>
     for State<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes:
+        RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Send,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Rounds: SharedMsgs<MulticastStreamIdx, Msg>,
     Types::Hash: Send,
-    Msg: RoundMsg<IDTypes::RoundID> {
+    Msg: RoundMsg<IDTypes::RoundID>
+{
     type MsgsError = WithMutexPoison<
         <Types::Rounds as SharedMsgs<MulticastStreamIdx, Msg>>::MsgsError
     >;
@@ -176,26 +184,26 @@ where
 
 impl<IDTypes, ProtoTypes, Types> State<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: PartyTypes + RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes:
+        PartyTypes + RoundPartyIDTypes<PartyID = MulticastStreamIdx> + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Send,
     Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
-    Types::Hash: Send {
+    Types::Hash: Send
+{
     #[inline]
-    pub(crate) fn new(
-        rounds: Types::Rounds,
-    ) -> Self {
+    pub(crate) fn new(rounds: Types::Rounds) -> Self {
         State {
-            rounds: Arc::new(Mutex::new(rounds)),
+            rounds: Arc::new(Mutex::new(rounds))
         }
     }
 
-    fn init_rounds(
+    pub(crate) fn init_rounds<'a, I>(
         &self,
-        codec: IDTypes::PartyCodec,
         self_party: IDTypes::Party,
-        party_data: &[IDTypes::Party]
+        party_data: I
     ) -> Result<
         (),
         StateInitRoundsError<
@@ -204,6 +212,8 @@ where
         >
     >
     where
+        I: Iterator<Item = &'a IDTypes::Party>,
+        IDTypes::Party: 'a,
         Types::Rounds: RoundsSetParties<IDTypes> {
         let mut guard = self
             .rounds
@@ -211,7 +221,7 @@ where
             .map_err(|_| StateInitRoundsError::MutexPoison)?;
 
         guard
-            .set_parties(codec, self_party, party_data)
+            .set_parties(self_party, party_data)
             .map_err(|err| StateInitRoundsError::Parties { err: err })?;
         guard
             .advance()
@@ -252,15 +262,22 @@ where
             Types::BatchError,
             Types::AdvanceError
         >
-    > {
-        let mut guard = self.rounds
+    >{
+        trace!(target: "consensus-component-state",
+               "receiving message from {}",
+               party);
+
+        let mut guard = self
+            .rounds
             .lock()
             .map_err(|_| StateRecvError::MutexPoison)?;
 
         if let Some((round, oper)) = guard
             .recv(&party, msg)
-            .map_err(|err| StateRecvError::Recv { err: err })? {
-            guard.update(&oper)
+            .map_err(|err| StateRecvError::Recv { err: err })?
+        {
+            guard
+                .update(&oper)
                 .map_err(|err| StateRecvError::Update { err: err })?;
 
             let newround = guard
@@ -276,33 +293,49 @@ where
 
 impl<IDTypes, ProtoTypes, Types> StateThread<IDTypes, ProtoTypes, Types>
 where
-    IDTypes: 'static + PartyTypes + RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: 'static
+        + PartyTypes
+        + RoundPartyIDTypes<PartyID = MulticastStreamIdx>
+        + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128> + Send,
     ProtoTypes: 'static + ConsensusProtoMsgTypes<IDTypes::RoundID>,
     ProtoTypes::Msg: Send,
     Types::Rounds: RoundsRecv<IDTypes, ProtoTypes, Types::Oper>,
-    Types: 'static + ConsensusPeerTypes<IDTypes, ProtoTypes>
+    Types: 'static
+        + ConsensusPeerTypes<IDTypes, ProtoTypes>
         + ConsensusRecvTypes<IDTypes, ProtoTypes>,
-    Types::Hash: Send {
+    Types::Hash: Send
+{
     pub(crate) fn new(
         state: State<IDTypes, ProtoTypes, Types>,
         peers: PeerSessionState<IDTypes, ProtoTypes, Types>,
         peers_notify: Notify,
         sender_notify: Notify,
-        shutdown: ShutdownFlag,
+        mut shutdown: ShutdownFlag,
         hash: Types::Hash
-    ) -> Result<(
-        Self,
-        Sender<Vec<Types::HashID>>,
-        Sender<(MulticastStreamIdx, ProtoTypes::Msg)>,
-        Notify
-    ), std::io::Error> {
-        let poll = Poll::new()?;
-        let waker = Waker::new(poll.registry(), WAKER_TOKEN)?;
+    ) -> Result<
+        (
+            Self,
+            Sender<Vec<Types::HashID>>,
+            Sender<(MulticastStreamIdx, ProtoTypes::Msg)>,
+            Notify
+        ),
+        WithMutexPoison<std::io::Error>
+    > {
+        let poll =
+            Poll::new().map_err(|err| WithMutexPoison::Inner { err: err })?;
+        let waker = Waker::new(poll.registry(), WAKER_TOKEN)
+            .map_err(|err| WithMutexPoison::Inner { err: err })?;
         let waker = Arc::new(waker);
         let notify = Notify::new(waker);
         let (round_reqs_send, round_reqs_recv) = channel();
         let (msgs_send, msgs_recv) = channel();
+
+        shutdown
+            .add_notify(notify.clone())
+            .map_err(|_| WithMutexPoison::MutexPoison)?;
+
         let thread = StateThread {
             poll: poll,
             shutdown: shutdown,
@@ -316,24 +349,6 @@ where
         };
 
         Ok((thread, round_reqs_send, msgs_send, notify))
-    }
-
-    #[inline]
-    fn init_rounds(
-        &self,
-        codec: IDTypes::PartyCodec,
-        self_party: IDTypes::Party,
-        party_data: &[IDTypes::Party]
-    ) -> Result<
-        (),
-        StateInitRoundsError<
-            <Types::Rounds as RoundsSetParties<IDTypes>>::SetPartiesError,
-            Types::AdvanceError
-        >
-    >
-    where
-        Types::Rounds: RoundsSetParties<IDTypes> {
-        self.state.init_rounds(codec, self_party, party_data)
     }
 
     fn recv(
@@ -350,21 +365,24 @@ where
             Types::BatchError,
             Types::AdvanceError
         >
-    > {
+    >{
         if let Some((round, oper, newround)) = self.state.recv(party, msg)? {
             if let Some((_, when)) = newround {
                 *next = next_retry(next, &when);
             }
 
-            if let Some(batch) = oper.take_batch(&self.hash)
-                .map_err(|err| StateRecvError::Batch { err: err })? {
+            if let Some(batch) = oper
+                .take_batch(&self.hash)
+                .map_err(|err| StateRecvError::Batch { err: err })?
+            {
                 debug!(target: "consensus-component-state",
                        "adding round {} to outbound queue",
                        round);
 
                 let msg = ConsensusCtlRound::new(round, batch, None);
 
-                self.peers.add_outbound(msg)
+                self.peers
+                    .add_outbound(msg)
                     .map_err(|_| StateRecvError::MutexPoison)?;
                 self.peers_notify
                     .notify()
@@ -387,24 +405,28 @@ where
                "submitting {} hashes",
                hashes.len());
 
-        self.state.add_hashes(hashes)
+        self.state
+            .add_hashes(hashes)
             .map_err(|err| WithIOError::Inner { err: err })?;
         self.sender_notify
             .notify()
             .map_err(|err| WithIOError::IO { err: err })
     }
 
-    fn handle_new_hashes(
-        &mut self,
-    ) -> bool {
+    fn handle_new_hashes(&mut self) -> bool {
         loop {
+            debug!(target: "consensus-component-state-thread",
+                   "listening for new hashes");
+
             match self.round_reqs.try_recv() {
-                Ok(hashes) => if let Err(err) = self.add_hashes(hashes) {
-                    error!(target: "consensus-component-state-thread",
+                Ok(hashes) => {
+                    if let Err(err) = self.add_hashes(hashes) {
+                        error!(target: "consensus-component-state-thread",
                            "error adding hashes: {}",
                            err);
 
-                    return false
+                        return false;
+                    }
                 }
                 Err(TryRecvError::Disconnected) => return false,
                 Err(TryRecvError::Empty) => return true
@@ -414,19 +436,21 @@ where
 
     fn handle_msgs(
         &mut self,
-        next: &mut Option<Instant>,
+        next: &mut Option<Instant>
     ) -> bool {
-        debug!(target: "consensus-component-state-thread",
-               "handling consensus protocol messages");
         loop {
+            debug!(target: "consensus-component-state-thread",
+                   "listening for consensus protocol messages");
+
             match self.msgs.try_recv() {
-                Ok((party, msg)) => if let Err(err) = self
-                    .recv(next, party, msg) {
-                    error!(target: "consensus-component-state-thread",
+                Ok((party, msg)) => {
+                    if let Err(err) = self.recv(next, party, msg) {
+                        error!(target: "consensus-component-state-thread",
                            "error handling consensus protocol message: {}",
                            err);
 
-                    return false
+                        return false;
+                    }
                 }
                 Err(TryRecvError::Disconnected) => return false,
                 Err(TryRecvError::Empty) => return true
@@ -437,9 +461,13 @@ where
     fn handle_events(
         &mut self,
         events: &mut Events,
-        next: &mut Option<Instant>,
+        next: &mut Option<Instant>
     ) -> bool {
         let mut out = true;
+        let _ = next.take();
+
+        debug!(target: "consensus-component-state-thread",
+               "handling events");
 
         if events
             .iter()
@@ -448,14 +476,14 @@ where
 
                 if token != WAKER_TOKEN {
                     error!(target: "consensus-component-state-thread",
-                           "unknown token {}",
-                           token.0);
+                       "unknown token {}",
+                       token.0);
                 }
 
                 token
-            }).any(|token| token == WAKER_TOKEN) {
-
-
+            })
+            .any(|token| token == WAKER_TOKEN)
+        {
             out &= self.handle_new_hashes();
             out &= self.handle_msgs(next);
         }
@@ -463,9 +491,7 @@ where
         out
     }
 
-    fn run(
-        mut self,
-    ) {
+    fn run(mut self) {
         let mut next = Some(Instant::now());
         let mut events = Events::with_capacity(1);
         let mut now;
@@ -489,7 +515,8 @@ where
                                "waiting for poll indefinitely");
                     }
 
-                    self.poll.poll(&mut events, duration)
+                    self.poll
+                        .poll(&mut events, duration)
                         .inspect_err(|err| {
                             error!(target: "poll-thread",
                                    "error polling: {}",
@@ -519,7 +546,7 @@ where
 
 impl<Inner> Display for WithIOError<Inner>
 where
-    Inner: Display,
+    Inner: Display
 {
     fn fmt(
         &self,
@@ -527,7 +554,7 @@ where
     ) -> Result<(), Error> {
         match self {
             WithIOError::Inner { err } => err.fmt(f),
-            WithIOError::IO { err } => err.fmt(f),
+            WithIOError::IO { err } => err.fmt(f)
         }
     }
 }

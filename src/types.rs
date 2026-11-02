@@ -36,15 +36,16 @@ use constellation_component_common::bus::types::MulticastDatagramBusTypes;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_consensus_common::oper::OperBatch;
 use constellation_consensus_common::parties::PartyTypes;
+use constellation_consensus_common::parties::RoundIDGenTypes;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
 use constellation_consensus_common::parties::RoundPartyIdxTypes;
-use constellation_consensus_common::parties::RoundIDGenTypes;
 use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
 use constellation_consensus_common::proto::ConsensusProtoOutboundTypes;
 use constellation_consensus_common::round::RoundMsg;
 use constellation_consensus_common::round::RoundsAdvance;
 use constellation_consensus_common::round::RoundsRecv;
+use constellation_consensus_common::round::RoundsSetParties;
 use constellation_consensus_common::round::RoundsSubmit;
 use constellation_consensus_common::round::RoundsUpdate;
 use constellation_streams::large_obj::LargeObjID;
@@ -60,49 +61,49 @@ pub trait ConsensusBaseTypes {
     type HashID: Clone + Debug + Display + Hash + HashID + Eq + Send;
     type HashConfig: Default + for<'a> Deserialize<'a> + Serialize;
     type HashCreateError: Debug + Display;
-    type Hash: Clone + Create<Config = Self::HashConfig,
-                              CreateError = Self::HashCreateError>
-        + HashAlgo<HashID = Self::HashID> + Send;
+    type Hash: Clone
+        + Create<Config = Self::HashConfig, CreateError = Self::HashCreateError>
+        + HashAlgo<HashID = Self::HashID>
+        + Send;
     type BatchError: Debug + Display;
-    type Oper: OperBatch<
-            Self::Hash,
-            BatchError = Self::BatchError
-        > + Send;
+    type Oper: OperBatch<Self::Hash, BatchError = Self::BatchError> + Send;
     type Seal: Clone + Send;
-    type SealCodec: Clone + Decoder<Self::Seal> + Encoder<Self::Seal>
-        + CreateWithParam<Self::SealCodecParam,
-                          CreateError = Self::SealCodecCreateError>;
+    type SealCodec: Clone
+        + Decoder<Self::Seal>
+        + Encoder<Self::Seal>
+        + CreateWithParam<
+            Self::SealCodecParam,
+            CreateError = Self::SealCodecCreateError
+        >;
     type SealCodecCreateError: Debug + Display + ScopedError;
     type SealCodecParam: Clone + Default;
 }
 
 pub trait ConsensusMsgTypes<IDTypes, ProtoTypes>: ConsensusBaseTypes
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> {
-    type Prin: Clone + Display + Eq + Hash + for<'a> Deserialize<'a> + Serialize + Send + Sync;
-    type AuthNMsg: AuthNed<Self::Prin>
-        + AuthNedDestruct<Self::Prin, ProtoTypes::Msg>;
+    type AuthNMsg: AuthNed<IDTypes::Party>
+        + AuthNedDestruct<IDTypes::Party, ProtoTypes::Msg>;
 }
 
 pub trait ConsensusRecvTypes<IDTypes, ProtoTypes>:
     ConsensusMsgTypes<IDTypes, ProtoTypes>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128>,
-    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>
-{
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> {
+    type SetPartiesError: Debug + Display + ScopedError;
     type SubmitError: Debug + Display + ScopedError;
     type AdvanceError: Debug + Display;
     type UpdateError: Debug + Display;
     type Rounds: RoundsRecv<IDTypes, ProtoTypes, Self::Oper>
-      + RoundsAdvance<
-        IDTypes::RoundID,
-        AdvanceError = Self::AdvanceError
-    > + RoundsUpdate<
-        Self::Oper,
-        UpdateError = Self::UpdateError
-    > + RoundsSubmit<Self::HashID, SubmitError = Self::SubmitError>
+        + RoundsAdvance<IDTypes::RoundID, AdvanceError = Self::AdvanceError>
+        + RoundsUpdate<Self::Oper, UpdateError = Self::UpdateError>
+        + RoundsSubmit<Self::HashID, SubmitError = Self::SubmitError>
+        + RoundsSetParties<IDTypes, SetPartiesError = Self::SetPartiesError>
         + SharedMsgs<MulticastStreamIdx, ProtoTypes::Msg>
         + Send;
 }
@@ -110,101 +111,168 @@ where
 pub trait ConsensusPeerTypes<IDTypes, ProtoTypes>:
     ConsensusMsgTypes<IDTypes, ProtoTypes>
 where
-    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx>,
+    IDTypes: RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
     IDTypes::RoundID: From<u128> + Into<u128>,
     ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID> {
     type PeerPrin: Clone + Debug + Display + Eq + Hash + Send + Sync;
     type IDsCreateError: Debug + Display + ScopedError;
     type IDsConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
     type IDs: Create<Config = Self::IDsConfig>
-        + Iterator<Item = LargeObjID> + Send;
+        + Iterator<Item = LargeObjID>
+        + Send;
     type CtlAuthNMsg: AuthNed<Self::PeerPrin>
         + AuthNedDestruct<
-            Self::Prin,
+            IDTypes::Party,
             ConsensusCtl<IDTypes::RoundID, Self::HashID, Self::Seal>
         >;
 }
 
 pub trait ConsensusTypes:
     ConsensusPeerTypes<Self::IDTypes, Self::ProtoTypes>
-    + ConsensusRecvTypes<Self::IDTypes, Self::ProtoTypes> + Sized {
+    + ConsensusRecvTypes<Self::IDTypes, Self::ProtoTypes>
+    + Sized {
     type Ctx: 'static + Clone + NSNameCachesCtx + Send;
+    type Prin: Clone
+        + Display
+        + Eq
+        + Hash
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send
+        + Sync;
     type RoundID: Clone + Debug + Display + From<u128> + Into<u128> + Ord + Send;
     type RoundIDsConfig: Default + for<'a> Deserialize<'a> + Serialize;
     type RoundIDsCreateError: Debug + Display;
     type RoundIDs: Iterator<Item = Self::RoundID>
-        + Create<Config = Self::RoundIDsConfig,
-                 CreateError = Self::RoundIDsCreateError>;
+        + Create<
+            Config = Self::RoundIDsConfig,
+            CreateError = Self::RoundIDsCreateError
+        >;
     type IDTypes: RoundIDGenTypes<
-        PartyID = MulticastStreamIdx,
-        RoundID = Self::RoundID,
-        RoundIDs = Self::RoundIDs
-    > + RoundPartyIdxTypes + PartyTypes + Send;
+            PartyID = MulticastStreamIdx,
+            RoundID = Self::RoundID,
+            RoundIDs = Self::RoundIDs
+        > + RoundPartyIdxTypes
+        + PartyTypes<Party = Self::Prin>
+        + Send;
     type Msg: Clone + Debug + RoundMsg<Self::RoundID> + Send;
-    type ProtoTypes: ConsensusProtoOutboundTypes<
-        Self::IDTypes,
-        Msg = Self::Msg
-    > + Send;
-    type ConsensusEpochsConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type ConsensusSessAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
-    type ConsensusMsgAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
-    type ConsensusUDPConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type ConsensusUnixConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type ConsensusEncoderConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type ConsensusDecoderConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type ProtoTypes: ConsensusProtoOutboundTypes<Self::IDTypes, Msg = Self::Msg>
+        + Send;
+    type ConsensusEpochsConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type ConsensusSessAuthConfig: Clone
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type ConsensusMsgAuthConfig: Clone
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type ConsensusUDPConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type ConsensusUnixConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type ConsensusEncoderConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type ConsensusDecoderConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
     type ConsensusBusTypes: MulticastDatagramBusTypes<
-        Self::Ctx,
-        // XXX This might be overly restrictive
-        MsgPrin = Self::Prin,
-        SessionPrin = Self::Prin,
-        OutMsg = Self::Msg,
-        AuthNMsg = Self::AuthNMsg,
-        MsgAuthConfig = Self::ConsensusMsgAuthConfig,
-        EpochsConfig = Self::ConsensusEpochsConfig,
-        ResolverConfig = Self::ResolverConfig,
-        EncoderConfig = Self::ConsensusEncoderConfig,
-        DecoderConfig = Self::ConsensusDecoderConfig,
-        UDPConfig = Self::ConsensusUDPConfig,
-        UnixConfig = Self::ConsensusUnixConfig,
-        SessionAuthConfig = Self::ConsensusSessAuthConfig,
-        Recv = ConsensusAuthNRecv<Self::IDTypes, Self::ProtoTypes, Self>,
-        Msgs = State<Self::IDTypes, Self::ProtoTypes, Self>
-    >;
-    type ConsensusConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+            Self::Ctx,
+            // XXX This might be overly restrictive
+            MsgPrin = Self::Prin,
+            SessionPrin = Self::Prin,
+            OutMsg = Self::Msg,
+            AuthNMsg = Self::AuthNMsg,
+            MsgAuthConfig = Self::ConsensusMsgAuthConfig,
+            EpochsConfig = Self::ConsensusEpochsConfig,
+            ResolverConfig = Self::ResolverConfig,
+            EncoderConfig = Self::ConsensusEncoderConfig,
+            DecoderConfig = Self::ConsensusDecoderConfig,
+            UDPConfig = Self::ConsensusUDPConfig,
+            UnixConfig = Self::ConsensusUnixConfig,
+            SessionAuthConfig = Self::ConsensusSessAuthConfig,
+            Recv = ConsensusAuthNRecv<Self::IDTypes, Self::ProtoTypes, Self>,
+            Msgs = State<Self::IDTypes, Self::ProtoTypes, Self>
+        >;
+    type ConsensusConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
     type ConsensusCreateError: Debug + Display;
     type ConsensusRoundsError: Debug + Display;
     type Consensus: ConsensusProto<
-        Self::IDTypes,
-        Config = Self::ConsensusConfig,
-        Rounds = Self::Rounds,
-        CreateError = Self::ConsensusCreateError,
-        RoundsError = Self::ConsensusRoundsError
-    >;
-    type ResolverConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type PeerHashConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type PeerEpochsConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+            Self::IDTypes,
+            Config = Self::ConsensusConfig,
+            Rounds = Self::Rounds,
+            CreateError = Self::ConsensusCreateError,
+            RoundsError = Self::ConsensusRoundsError
+        >;
+    type ResolverConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type PeerHashConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type PeerEpochsConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
     type PeerProtoAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
     type PeerMsgAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
     type PeerSessAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
-    type PeerUDPConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
-    type PeerUnixConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type PeerUDPConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
+    type PeerUnixConfig: Clone
+        + Default
+        + for<'a> Deserialize<'a>
+        + Serialize
+        + Send;
     type PeerBusTypes: DispatchLargeObjBusTypes<
-        Self::Ctx,
-        SessionPrin = Self::PeerPrin,
-        MsgPrin = Self::PeerPrin,
-        InMsg = ConsensusCtl<Self::RoundID, Self::HashID, Self::Seal>,
-        OutMsg = ConsensusCtl<Self::RoundID, Self::HashID, Self::Seal>,
-        EncoderConfig = (),
-        DecoderConfig = (),
-        AuthNMsg = Self::CtlAuthNMsg,
-        IDsConfig = Self::IDsConfig,
-        HashConfig = Self::PeerHashConfig,
-        UDPConfig = Self::PeerUDPConfig,
-        UnixConfig = Self::PeerUnixConfig,
-        EpochsConfig = Self::PeerEpochsConfig,
-        MsgAuthConfig = Self::PeerMsgAuthConfig,
-        SessionAuthConfig = Self::PeerSessAuthConfig,
-        LargeObjMsgAuthConfig = Self::PeerProtoAuthConfig,
-        DispTypes = PeerSessionDispatchTypes<Self::IDTypes, Self::ProtoTypes, Self>
-    >;
+            Self::Ctx,
+            SessionPrin = Self::PeerPrin,
+            MsgPrin = Self::PeerPrin,
+            InMsg = ConsensusCtl<Self::RoundID, Self::HashID, Self::Seal>,
+            OutMsg = ConsensusCtl<Self::RoundID, Self::HashID, Self::Seal>,
+            EncoderConfig = (),
+            DecoderConfig = (),
+            AuthNMsg = Self::CtlAuthNMsg,
+            IDsConfig = Self::IDsConfig,
+            HashConfig = Self::PeerHashConfig,
+            UDPConfig = Self::PeerUDPConfig,
+            UnixConfig = Self::PeerUnixConfig,
+            EpochsConfig = Self::PeerEpochsConfig,
+            MsgAuthConfig = Self::PeerMsgAuthConfig,
+            SessionAuthConfig = Self::PeerSessAuthConfig,
+            LargeObjMsgAuthConfig = Self::PeerProtoAuthConfig,
+            DispTypes = PeerSessionDispatchTypes<
+                Self::IDTypes,
+                Self::ProtoTypes,
+                Self
+            >
+        >;
 }
