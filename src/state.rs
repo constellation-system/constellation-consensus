@@ -41,6 +41,7 @@ use constellation_consensus_common::parties::PartyTypes;
 use constellation_consensus_common::parties::RoundPartyIDTypes;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
 use constellation_consensus_common::round::RoundMsg;
+use constellation_consensus_common::round::Rounds;
 use constellation_consensus_common::round::RoundsAdvance;
 use constellation_consensus_common::round::RoundsRecv;
 use constellation_consensus_common::round::RoundsSetParties;
@@ -205,7 +206,7 @@ where
         self_party: IDTypes::Party,
         party_data: I
     ) -> Result<
-        (),
+        (Option<IDTypes::RoundID>, Option<Instant>),
         StateInitRoundsError<
             <Types::Rounds as RoundsSetParties<IDTypes>>::SetPartiesError,
             Types::AdvanceError
@@ -223,11 +224,10 @@ where
         guard
             .set_parties(self_party, party_data)
             .map_err(|err| StateInitRoundsError::Parties { err: err })?;
+
         guard
             .advance()
-            .map_err(|err| StateInitRoundsError::Advance { err: err })?;
-
-        Ok(())
+            .map_err(|err| StateInitRoundsError::Advance { err: err })
     }
 
     fn add_hashes(
@@ -245,6 +245,41 @@ where
             .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 
+    fn time_update(
+        &self,
+        next_time_update: &mut Option<Instant>,
+        now: Instant
+    ) -> Result<bool, WithMutexPoison<Types::TimeUpdateError>> {
+        debug!(target: "consensus-component-state",
+                   "checking for time update");
+
+        if next_time_update.is_some_and(|when| when <= now) {
+            debug!(target: "consensus-component-state",
+                   "time update for round state");
+
+            *next_time_update = self
+                .rounds
+                .lock()
+                .map_err(|_| WithMutexPoison::MutexPoison)?
+                .time_update()
+                .map_err(|err| WithMutexPoison::Inner { err: err })?;
+
+            if let Some(when) = next_time_update &&
+                now < *when
+            {
+                let duration = *when - now;
+
+                trace!(target: "consensus-component-state",
+                       "next time update in {}.{:03}s",
+                       duration.as_secs(), duration.subsec_millis());
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn recv(
         &self,
         party: MulticastStreamIdx,
@@ -253,7 +288,8 @@ where
         Option<(
             IDTypes::RoundID,
             Types::Oper,
-            Option<(IDTypes::RoundID, Option<Instant>)>
+            Option<IDTypes::RoundID>,
+            Option<Instant>
         )>,
         StateRecvError<
             <Types::Rounds as RoundsRecv<IDTypes, ProtoTypes,
@@ -280,11 +316,11 @@ where
                 .update(&oper)
                 .map_err(|err| StateRecvError::Update { err: err })?;
 
-            let newround = guard
+            let (newround, next_update) = guard
                 .advance()
                 .map_err(|err| StateRecvError::Advance { err: err })?;
 
-            Ok(Some((round, oper, newround)))
+            Ok(Some((round, oper, newround, next_update)))
         } else {
             Ok(None)
         }
@@ -353,7 +389,7 @@ where
 
     fn recv(
         &self,
-        next: &mut Option<Instant>,
+        next_time_update: &mut Option<Instant>,
         party: MulticastStreamIdx,
         msg: ProtoTypes::Msg,
     ) -> Result<
@@ -366,9 +402,18 @@ where
             Types::AdvanceError
         >
     >{
-        if let Some((round, oper, newround)) = self.state.recv(party, msg)? {
-            if let Some((_, when)) = newround {
-                *next = next_retry(next, &when);
+        if let Some((round, oper, _, next_update)) =
+            self.state.recv(party, msg)?
+        {
+            *next_time_update = next_retry(&next_update, next_time_update);
+
+            if let Some(when) = next_time_update {
+                let now = Instant::now();
+                let duration = *when - now;
+
+                trace!(target: "consensus-component-state",
+                       "next time update in {}.{:03}s",
+                       duration.as_secs(), duration.subsec_millis());
             }
 
             if let Some(batch) = oper
@@ -436,7 +481,7 @@ where
 
     fn handle_msgs(
         &mut self,
-        next: &mut Option<Instant>
+        next_time_update: &mut Option<Instant>
     ) -> bool {
         loop {
             debug!(target: "consensus-component-state-thread",
@@ -444,7 +489,7 @@ where
 
             match self.msgs.try_recv() {
                 Ok((party, msg)) => {
-                    if let Err(err) = self.recv(next, party, msg) {
+                    if let Err(err) = self.recv(next_time_update, party, msg) {
                         error!(target: "consensus-component-state-thread",
                            "error handling consensus protocol message: {}",
                            err);
@@ -461,13 +506,32 @@ where
     fn handle_events(
         &mut self,
         events: &mut Events,
-        next: &mut Option<Instant>
+        next: &mut Option<Instant>,
+        next_time_update: &mut Option<Instant>,
+        now: Instant
     ) -> bool {
         let mut out = true;
         let _ = next.take();
 
         debug!(target: "consensus-component-state-thread",
                "handling events");
+
+        match self.state.time_update(next_time_update, now) {
+            Ok(notify) => {
+                if notify && let Err(err) = self.sender_notify.notify() {
+                    error!(target: "consensus-component-state-thread",
+                       "error notifying sender: {}",
+                       err);
+                }
+            }
+            Err(err) => {
+                debug!(target: "consensus-component-state-thread",
+                       "error handling time update: {}",
+                       err);
+
+                out = false;
+            }
+        }
 
         if events
             .iter()
@@ -485,13 +549,16 @@ where
             .any(|token| token == WAKER_TOKEN)
         {
             out &= self.handle_new_hashes();
-            out &= self.handle_msgs(next);
+            out &= self.handle_msgs(next_time_update);
         }
 
         out
     }
 
-    fn run(mut self) {
+    fn run(
+        mut self,
+        mut next_time_update: Option<Instant>
+    ) {
         let mut next = Some(Instant::now());
         let mut events = Events::with_capacity(1);
         let mut now;
@@ -501,6 +568,7 @@ where
 
         while {
             now = Instant::now();
+            next = next_retry(&next, &next_time_update);
 
             self.shutdown.is_live() &&
                 (next.is_some_and(|next: Instant| next < now) || {
@@ -508,7 +576,7 @@ where
 
                     if let Some(duration) = &duration {
                         trace!(target: "consensus-component-state-thread",
-                               "waiting for poll for {}.{:03}",
+                               "waiting for poll for {}.{:03}s",
                                duration.as_secs(), duration.subsec_millis());
                     } else {
                         trace!(target: "consensus-component-state-thread",
@@ -524,7 +592,12 @@ where
                         })
                         .is_ok()
                 }) &&
-                self.handle_events(&mut events, &mut next)
+                self.handle_events(
+                    &mut events,
+                    &mut next,
+                    &mut next_time_update,
+                    now
+                )
         } {}
 
         if let Err(err) = self.shutdown.set() {
@@ -537,10 +610,13 @@ where
                "state thread exiting")
     }
 
-    pub(crate) fn start(self) -> Result<JoinHandle<()>, std::io::Error> {
+    pub(crate) fn start(
+        self,
+        next_time_update: Option<Instant>
+    ) -> Result<JoinHandle<()>, std::io::Error> {
         Builder::new()
             .name(String::from("consensus-state-thread"))
-            .spawn(move || self.run())
+            .spawn(move || self.run(next_time_update))
     }
 }
 

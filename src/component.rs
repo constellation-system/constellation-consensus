@@ -25,6 +25,7 @@ use std::fmt::Formatter;
 use std::hash::Hash;
 use std::path::PathBuf;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 #[cfg(feature = "standalone")]
 use clap::ArgMatches;
@@ -83,7 +84,8 @@ where
         ConsensusAuthNRecv<Types::IDTypes, Types::ProtoTypes, Types>,
     peers: DispatchLargeObjBusStarter<Types::PeerBusTypes, Types::Ctx>,
     peers_dispatch:
-        PeerSessionDispatch<Types::IDTypes, Types::ProtoTypes, Types>
+        PeerSessionDispatch<Types::IDTypes, Types::ProtoTypes, Types>,
+    time_update: Option<Instant>
 }
 
 pub struct ConsensusComponentCleanup<Types>
@@ -251,12 +253,12 @@ where
         );
         let mut consensus_recv =
             ConsensusAuthNRecv::create(consensus_sender, state_notify.clone());
-
-        state
+        let (_, time_update) = state
             .init_rounds(self_party, parties.iter().map(|(_, id)| id))
             .map_err(|err| ConsensusComponentCreateError::Parties {
                 err: err
             })?;
+
         consensus_recv
             .set_parties(parties.into_iter())
             .map_err(|_| ConsensusComponentCreateError::MutexPoison)?;
@@ -267,6 +269,7 @@ where
             consensus: consensus,
             consensus_recv: consensus_recv,
             peers_dispatch: peers_dispatch,
+            time_update: time_update,
             peers: peers
         })
     }
@@ -290,10 +293,11 @@ where
             consensus,
             consensus_recv,
             peers,
-            peers_dispatch
+            peers_dispatch,
+            time_update
         } = self;
 
-        match state_thread.start() {
+        match state_thread.start(time_update) {
             Ok(state_join) => match peers
                 .start(peers_dispatch, shutdown.clone())
             {
@@ -837,6 +841,7 @@ impl ConsensusRecvTypes<StandalonePBFTIDTypes, PBFTProtoTypes>
     >;
     type SetPartiesError = TooShort;
     type SubmitError = SingleRoundSubmitError<Infallible, Infallible>;
+    type TimeUpdateError = Infallible;
     type UpdateError = PBFTProtoStateUpdateError<SHA3ID>;
 }
 

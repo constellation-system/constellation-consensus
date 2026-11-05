@@ -43,6 +43,7 @@ use constellation_consensus_common::proto::ConsensusProto;
 use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
 use constellation_consensus_common::proto::ConsensusProtoOutboundTypes;
 use constellation_consensus_common::round::RoundMsg;
+use constellation_consensus_common::round::Rounds;
 use constellation_consensus_common::round::RoundsAdvance;
 use constellation_consensus_common::round::RoundsRecv;
 use constellation_consensus_common::round::RoundsSetParties;
@@ -98,12 +99,14 @@ where
     type SetPartiesError: Debug + Display + ScopedError;
     type SubmitError: Debug + Display + ScopedError;
     type AdvanceError: Debug + Display;
+    type TimeUpdateError: Debug + Display;
     type UpdateError: Debug + Display;
     type Rounds: RoundsRecv<IDTypes, ProtoTypes, Self::Oper>
         + RoundsAdvance<IDTypes::RoundID, AdvanceError = Self::AdvanceError>
         + RoundsUpdate<Self::Oper, UpdateError = Self::UpdateError>
         + RoundsSubmit<Self::HashID, SubmitError = Self::SubmitError>
         + RoundsSetParties<IDTypes, SetPartiesError = Self::SetPartiesError>
+        + Rounds<TimeUpdateError = Self::TimeUpdateError>
         + SharedMsgs<MulticastStreamIdx, ProtoTypes::Msg>
         + Send;
 }
