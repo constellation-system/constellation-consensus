@@ -433,11 +433,11 @@ where
                     .notify()
                     .map_err(|err| StateRecvError::IO { err: err })?
             }
-
-            self.sender_notify
-                .notify()
-                .map_err(|err| StateRecvError::IO { err: err })?
         }
+
+        self.sender_notify
+            .notify()
+            .map_err(|err| StateRecvError::IO { err: err })?;
 
         Ok(())
     }

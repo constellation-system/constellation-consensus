@@ -50,7 +50,6 @@ use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
 use constellation_streams::frags::Frags;
 use constellation_streams::large_obj::LargeObjMsgs;
 use constellation_streams::large_obj::LargeObjProtoAddOutboundError;
-use constellation_streams::large_obj::LargeObjProtoCreateError;
 use constellation_streams::large_obj::LargeObjSender;
 use constellation_streams::multicast::MulticastStreamIdx;
 use log::debug;
@@ -166,13 +165,8 @@ where
 }
 
 #[derive(Debug)]
-pub enum PeerSessionDispatchError<Prin, Encoder, Decoder, IDs> {
-    Proto {
-        err: LargeObjProtoCreateError<Encoder, Decoder, IDs>
-    },
-    Exists {
-        prin: Prin
-    },
+pub enum PeerSessionDispatchError<Prin> {
+    Exists { prin: Prin },
     MutexPoison
 }
 
@@ -559,12 +553,7 @@ where
         + ConsensusRecvTypes<IDTypes, ProtoTypes>,
     Types::Hash: Send
 {
-    type SessionError = PeerSessionDispatchError<
-        Types::PeerPrin,
-        Types::SealCodecCreateError,
-        Types::SealCodecCreateError,
-        Types::IDsCreateError
-    >;
+    type SessionError = PeerSessionDispatchError<Types::PeerPrin>;
 
     fn session(
         &self,
@@ -629,17 +618,10 @@ impl<HashID> ScopedError for PeerSessionRecvError<HashID> {
     }
 }
 
-impl<Prin, Encoder, Decoder, IDs> ScopedError
-    for PeerSessionDispatchError<Prin, Encoder, Decoder, IDs>
-where
-    Encoder: ScopedError,
-    Decoder: ScopedError,
-    IDs: ScopedError
-{
+impl<Prin> ScopedError for PeerSessionDispatchError<Prin> {
     #[inline]
     fn scope(&self) -> ErrorScope {
         match self {
-            PeerSessionDispatchError::Proto { err } => err.scope(),
             PeerSessionDispatchError::Exists { .. } |
             PeerSessionDispatchError::MutexPoison => ErrorScope::Unrecoverable
         }
@@ -658,13 +640,9 @@ where
     }
 }
 
-impl<Prin, Encoder, Decoder, IDs> Display
-    for PeerSessionDispatchError<Prin, Encoder, Decoder, IDs>
+impl<Prin> Display for PeerSessionDispatchError<Prin>
 where
-    Prin: Display,
-    Encoder: Display,
-    Decoder: Display,
-    IDs: Display
+    Prin: Display
 {
     #[inline]
     fn fmt(
@@ -672,7 +650,6 @@ where
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            PeerSessionDispatchError::Proto { err } => err.fmt(f),
             PeerSessionDispatchError::Exists { prin } => {
                 write!(f, "peerr session already exists for {}", prin)
             }

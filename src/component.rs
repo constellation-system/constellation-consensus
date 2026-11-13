@@ -91,7 +91,6 @@ where
 pub struct ConsensusComponentCleanup<Types>
 where
     Types: 'static + ConsensusTypes + Send {
-    shutdown: ShutdownFlag,
     consensus_join: MulticastDatagramBus<Types::ConsensusBusTypes, Types::Ctx>,
     peers_join: DispatchLargeObjBus<Types::PeerBusTypes, Types::Ctx>,
     state_join: JoinHandle<()>
@@ -307,7 +306,6 @@ where
                     shutdown.clone()
                 ) {
                     Ok(consensus_join) => Ok(ConsensusComponentCleanup {
-                        shutdown: shutdown,
                         consensus_join: consensus_join,
                         peers_join: peers_join,
                         state_join: state_join
@@ -358,26 +356,57 @@ impl<Types> ConsensusComponentCleanup<Types>
 where
     Types: ConsensusTypes + Send
 {
-    pub fn cleanup(mut self) {
-        if let Err(err) = self.shutdown.set() {
-            error!(target: "consensus-component-cleanup",
-                   "error setting shutdown flag: {}",
-                   err);
-        }
+    pub fn cleanup(self) {
+        let ConsensusComponentCleanup {
+            consensus_join,
+            peers_join,
+            state_join,
+            ..
+        } = self;
 
-        self.consensus_join.cleanup();
-        self.peers_join.cleanup();
+        consensus_join.cleanup();
+        peers_join.cleanup();
 
         debug!(target: "consensus-component-cleanup",
                "joining state thread");
 
-        if self.state_join.join().is_err() {
-            error!(target: "consensus-component-cleanup",
-                   "error joining state thread")
+        if state_join.join().is_err() {
+            error!(target: "consensus-standalone-shutdown",
+                   "error joining peers thread")
         }
+    }
+}
 
-        debug!(target: "consensus-component-cleanup",
-               "all threads joined");
+impl<Types> ConsensusComponentErrorCleanup<Types>
+where
+    Types: ConsensusTypes + Send
+{
+    pub fn cleanup(self) {
+        debug!(target: "consensus-standalone",
+               "cleaning up consensus");
+
+        let ConsensusComponentErrorCleanup {
+            mut shutdown,
+            peers_join,
+            state_join
+        } = self;
+
+        if let Err(err) = shutdown.set() {
+            error!(target: "consensus-standalone-shutdown",
+                   "error setting shutdown flag: {}",
+                   err)
+        } else {
+            if let Some(peers) = peers_join {
+                peers.cleanup()
+            }
+
+            if let Some(state) = state_join &&
+                state.join().is_err()
+            {
+                error!(target: "consensus-standalone-shutdown",
+                           "error joining peers thread")
+            }
+        }
     }
 }
 
@@ -561,7 +590,7 @@ where
     type RunCleanup = ConsensusComponentCleanup<Types>;
     type RunErrorCleanup = ConsensusComponentErrorCleanup<Types>;
 
-    const DEFAULT_PIDFILE: &str = "/tmp/consensus.pid";
+    const DEFAULT_PIDFILE: &str = "/tmp/constellation-consensus.pid";
 
     fn run(
         self,
@@ -581,20 +610,7 @@ where
         create_cleanup: Self::CreateCleanup,
         run_cleanup: Self::RunCleanup
     ) {
-        let ConsensusComponentCleanup {
-            consensus_join,
-            peers_join,
-            state_join,
-            ..
-        } = run_cleanup;
-
-        consensus_join.cleanup();
-        peers_join.cleanup();
-
-        if state_join.join().is_err() {
-            error!(target: "consensus-standalone-shutdown",
-                   "error joining peers thread")
-        }
+        run_cleanup.cleanup();
 
         if create_cleanup.caches_join.join().is_err() {
             error!(target: "consensus-standalone-shutdown",
@@ -606,31 +622,7 @@ where
         mut create_cleanup: Self::CreateCleanup,
         run_cleanup: Self::RunErrorCleanup
     ) {
-        debug!(target: "consensus-standalone",
-               "cleaning up consensus");
-
-        let ConsensusComponentErrorCleanup {
-            mut shutdown,
-            peers_join,
-            state_join
-        } = run_cleanup;
-
-        if let Err(err) = shutdown.set() {
-            error!(target: "consensus-standalone-shutdown",
-                   "error setting shutdown flag: {}",
-                   err)
-        } else {
-            if let Some(peers) = peers_join {
-                peers.cleanup()
-            }
-
-            if let Some(state) = state_join &&
-                state.join().is_err()
-            {
-                error!(target: "consensus-standalone-shutdown",
-                           "error joining peers thread")
-            }
-        }
+        run_cleanup.cleanup();
 
         if let Err(err) = create_cleanup.shutdown.set() {
             error!(target: "consensus-standalone-shutdown",
