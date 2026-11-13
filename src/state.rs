@@ -405,6 +405,10 @@ where
         if let Some((round, oper, _, next_update)) =
             self.state.recv(party, msg)?
         {
+            debug!(target: "consensus-component-state",
+                   "round {} completed, handling results",
+                   round);
+
             *next_time_update = next_retry(&next_update, next_time_update);
 
             if let Some(when) = next_time_update {

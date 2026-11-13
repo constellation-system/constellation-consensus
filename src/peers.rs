@@ -54,6 +54,7 @@ use constellation_streams::large_obj::LargeObjSender;
 use constellation_streams::multicast::MulticastStreamIdx;
 use log::debug;
 use log::error;
+use log::trace;
 use log::warn;
 use serde::Deserialize;
 use serde::Serialize;
@@ -213,6 +214,10 @@ where
             + Encoder<ConsensusCtl<IDTypes::RoundID, Types::HashID, Types::Seal>>,
         WrapperCodec::Config: Default,
         F: Frags {
+        trace!(target: "peer-session-msg-state",
+               "trying to send to {}",
+               peer);
+
         // XXX the protocol should be refactored to send batches.
         if let Some(notify) = self.pending.remove(peer) {
             let _ = sender.add_outbound(&self.msg).map_err(|err| {
@@ -224,6 +229,10 @@ where
             notify
                 .notify()
                 .map_err(|err| PeerSessionAddMsgsError::IO { err: err })?;
+
+            trace!(target: "peer-session-msg-state",
+                   "sent to {}",
+                   peer);
         }
 
         Ok(!self.pending.is_empty())
@@ -281,6 +290,9 @@ where
             msg: ConsensusCtl::Round(msg)
         };
 
+        trace!(target: "peer-session-state",
+               "queuing peer message");
+
         self.pending.lock().map_err(|_| MutexPoison)?.push(pending);
 
         Ok(())
@@ -309,6 +321,9 @@ where
             PeerSessionAddMsgsError<WrapperCodec::EncodeError>
         > = None;
         let mut sent = false;
+
+        trace!(target: "peer-session-state",
+               "adding peer messages");
 
         self.pending
             .lock()
@@ -495,23 +510,8 @@ where
     pub(crate) fn new(
         send: Sender<Vec<Types::HashID>>,
         state_notify: Notify,
-        npeers_hint: Option<usize>,
-        npending_hint: Option<usize>
+        state: PeerSessionState<IDTypes, ProtoTypes, Types>
     ) -> Self {
-        let peers = match npeers_hint {
-            Some(size) => Vec::with_capacity(size),
-            None => Vec::new()
-        };
-        let peers = Arc::new(Mutex::new(peers));
-        let pending = match npending_hint {
-            Some(size) => Vec::with_capacity(size),
-            None => Vec::new()
-        };
-        let pending = Arc::new(Mutex::new(pending));
-        let state = PeerSessionState {
-            pending: pending,
-            peers: peers
-        };
         let sessions = Arc::new(Mutex::new(HashMap::new()));
 
         PeerSessionDispatch {

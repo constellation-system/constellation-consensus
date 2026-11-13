@@ -224,12 +224,13 @@ where
                 .map_err(|err| ConsensusComponentCreateError::IO {
                     err: err
                 })?;
+        // XXX use size hints.
         let peer_state = PeerSessionState::new();
         let state = State::new(rounds);
         let (state_thread, peers_sender, consensus_sender, state_notify) =
             StateThread::new(
                 state.clone(),
-                peer_state,
+                peer_state.clone(),
                 peers_notify,
                 consensus_notify,
                 shutdown.clone(),
@@ -243,12 +244,10 @@ where
                     ConsensusComponentCreateError::MutexPoison
                 }
             })?;
-        // XXX use size hints.
         let peers_dispatch = PeerSessionDispatch::new(
             peers_sender,
             state_notify.clone(),
-            None,
-            None
+            peer_state
         );
         let mut consensus_recv =
             ConsensusAuthNRecv::create(consensus_sender, state_notify.clone());
