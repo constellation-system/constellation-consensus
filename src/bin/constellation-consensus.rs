@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -17,9 +17,9 @@
 // <https://www.gnu.org/licenses/>.
 
 //! Standalone consensus component.
-use constellation_consensus::component::CompoundConsensusComponent;
+use constellation_consensus::component::StandaloneConsensusComponent;
 use constellation_standalone::StandaloneService;
 
 fn main() {
-    CompoundConsensusComponent::main()
+    StandaloneConsensusComponent::main()
 }

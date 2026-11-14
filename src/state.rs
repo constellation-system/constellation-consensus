@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -16,247 +16,224 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-use std::collections::VecDeque;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
-use std::hash::Hash;
-use std::marker::PhantomData;
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Receiver;
-use std::sync::mpsc::RecvTimeoutError;
-use std::sync::mpsc::SendError;
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::thread::spawn;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::Sender;
+use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::channel;
+use std::thread::Builder;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use constellation_common::codec::Codec;
-use constellation_common::error::MutexPoison;
 use constellation_common::error::WithMutexPoison;
-use constellation_common::hashid::HashAlgo;
-use constellation_common::hashid::HashID;
 use constellation_common::net::SharedMsgs;
+use constellation_common::retry::next_retry;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
 use constellation_component_common::consensus_ctl::ConsensusCtlRound;
-use constellation_component_common::PartyStreamIdx;
 use constellation_consensus_common::oper::OperBatch;
+use constellation_consensus_common::parties::PartyTypes;
+use constellation_consensus_common::parties::RoundPartyIDTypes;
+use constellation_consensus_common::proto::ConsensusProtoMsgTypes;
 use constellation_consensus_common::round::RoundMsg;
+use constellation_consensus_common::round::Rounds;
 use constellation_consensus_common::round::RoundsAdvance;
 use constellation_consensus_common::round::RoundsRecv;
 use constellation_consensus_common::round::RoundsSetParties;
 use constellation_consensus_common::round::RoundsSubmit;
 use constellation_consensus_common::round::RoundsUpdate;
-use constellation_consensus_common::state::RoundResultReporter;
+use constellation_streams::multicast::MulticastStreamIdx;
 use log::debug;
 use log::error;
 use log::info;
 use log::trace;
+use mio::Events;
+use mio::Poll;
+use mio::Token;
+use mio::Waker;
+use serde::Deserialize;
+use serde::Serialize;
 
-pub(crate) struct State<R, RoundID, H, Seal, Oper>
+use crate::peers::PeerSessionState;
+use crate::types::ConsensusPeerTypes;
+use crate::types::ConsensusRecvTypes;
+
+const WAKER_TOKEN: Token = Token(0);
+
+pub struct State<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsSubmit<H::HashID>
-        + Send,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Oper: OperBatch<H>,
-    Seal: Send {
-    oper: PhantomData<Oper>,
-    // XXX this may be better off as an mpsc.
-    outbound: Mutex<VecDeque<ConsensusCtlRound<RoundID, H::HashID, Seal>>>,
-    rounds: Mutex<R>,
-    notify: Notify
+    IDTypes:
+        RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
+    Types::Hash: Send {
+    // XXX it should be possible to separate out the outbound mailbox
+    // and just use that.
+    rounds: Arc<Mutex<Types::Rounds>>
 }
 
-pub(crate) struct StateThread<R, RoundID, H, Seal, Oper>
+pub(crate) struct StateThread<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsSubmit<H::HashID>
-        + Send,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: HashAlgo + Send,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    RoundID: Clone + Display + Ord + Send,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send {
-    state: Arc<State<R, RoundID, H, Seal, Oper>>,
-    recv: Receiver<(RoundID, Oper)>,
+    IDTypes:
+        RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusPeerTypes<IDTypes, ProtoTypes>
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
+    Types::Hash: Send {
+    poll: Poll,
+    state: State<IDTypes, ProtoTypes, Types>,
+    round_reqs: Receiver<Vec<Types::HashID>>,
+    msgs: Receiver<(MulticastStreamIdx, ProtoTypes::Msg)>,
+    peers: PeerSessionState<IDTypes, ProtoTypes, Types>,
+    /// Used to notify the sender of new messages.
+    sender_notify: Notify,
+    /// Used to notify the peers sender of a new round.
+    peers_notify: Notify,
     shutdown: ShutdownFlag,
-    hash: H
+    hash: Types::Hash
 }
 
-pub(crate) struct StateThreadReporter<RoundID, Oper> {
-    send: Sender<(RoundID, Oper)>
-}
-
-#[derive(Clone)]
-pub(crate) struct StateMsgs<R, RoundID, H, Seal, Oper>
-where
-    R: RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsSubmit<H::HashID>
-        + Send,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Oper: OperBatch<H>,
-    Seal: Send {
-    arc: Arc<State<R, RoundID, H, Seal, Oper>>
-}
-
-pub(crate) enum StateInitRoundsError<Parties, Advance> {
+#[derive(Debug)]
+pub enum StateInitRoundsError<Parties, Advance> {
     Parties { err: Parties },
     Advance { err: Advance },
     MutexPoison
 }
 
-impl<R, RoundID, H, Seal, Oper> From<Arc<State<R, RoundID, H, Seal, Oper>>>
-    for StateMsgs<R, RoundID, H, Seal, Oper>
+#[derive(Debug)]
+enum StateRecvError<Recv, Update, Batch, Advance> {
+    Recv { err: Recv },
+    Update { err: Update },
+    Batch { err: Batch },
+    Advance { err: Advance },
+    IO { err: std::io::Error },
+    MutexPoison
+}
+
+#[derive(Debug)]
+enum WithIOError<Inner> {
+    Inner { err: Inner },
+    IO { err: std::io::Error }
+}
+
+impl<IDTypes, ProtoTypes, Types> Clone for State<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsSubmit<H::HashID>
-        + Send,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Oper: OperBatch<H>,
-    Seal: Send
+    IDTypes:
+        RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
+    Types::Hash: Send
 {
     #[inline]
-    fn from(val: Arc<State<R, RoundID, H, Seal, Oper>>) -> Self {
-        StateMsgs { arc: val }
+    fn clone(&self) -> Self {
+        State {
+            rounds: self.rounds.clone()
+        }
     }
 }
 
-impl<R, RoundID, H, Seal, Oper, Msg> SharedMsgs<PartyStreamIdx, Msg>
-    for StateMsgs<R, RoundID, H, Seal, Oper>
+impl<IDTypes, ProtoTypes, Types, Msg> SharedMsgs<MulticastStreamIdx, Msg>
+    for State<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsSubmit<H::HashID>
-        + SharedMsgs<PartyStreamIdx, Msg>
-        + Send,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Msg: RoundMsg<RoundID>,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send
+    IDTypes:
+        RoundPartyIDTypes<PartyID = MulticastStreamIdx> + PartyTypes + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
+    Types::Rounds: SharedMsgs<MulticastStreamIdx, Msg>,
+    Types::Hash: Send,
+    Msg: RoundMsg<IDTypes::RoundID>
 {
-    type MsgsError = WithMutexPoison<R::MsgsError>;
+    type MsgsError = WithMutexPoison<
+        <Types::Rounds as SharedMsgs<MulticastStreamIdx, Msg>>::MsgsError
+    >;
 
     fn msgs(
-        &mut self
+        &mut self,
+        live: &HashSet<MulticastStreamIdx>,
+        now: Instant
     ) -> Result<
         (
-            Option<Vec<(Vec<PartyStreamIdx>, Vec<Msg>)>>,
+            Option<Vec<(Vec<MulticastStreamIdx>, Vec<Msg>)>>,
             Option<Instant>
         ),
         Self::MsgsError
     > {
-        self.arc
-            .rounds
+        self.rounds
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
-            .msgs()
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .msgs(live, now)
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<R, RoundID, H, Seal, Oper> State<R, RoundID, H, Seal, Oper>
+impl<IDTypes, ProtoTypes, Types> State<IDTypes, ProtoTypes, Types>
 where
-    R: RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsSubmit<H::HashID>
-        + Send,
-    RoundID: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Oper: OperBatch<H> + Send + Sync,
-    Seal: Send
+    IDTypes:
+        PartyTypes + RoundPartyIDTypes<PartyID = MulticastStreamIdx> + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    ProtoTypes: ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types: ConsensusRecvTypes<IDTypes, ProtoTypes>,
+    Types::Hash: Send
 {
     #[inline]
-    pub(crate) fn new(rounds: R) -> Self {
-        let outbound = VecDeque::new();
-
-        // XXX use size hints.
+    pub(crate) fn new(rounds: Types::Rounds) -> Self {
         State {
-            oper: PhantomData,
-            rounds: Mutex::new(rounds),
-            outbound: Mutex::new(outbound),
-            notify: Notify::new()
+            rounds: Arc::new(Mutex::new(rounds))
         }
     }
 
-    pub(crate) fn init_rounds<PartyData, C>(
+    pub(crate) fn init_rounds<'a, I>(
         &self,
-        codec: C,
-        self_party: PartyData,
-        party_data: &[PartyData]
-    ) -> Result<(), StateInitRoundsError<R::SetPartiesError, R::AdvanceError>>
+        self_party: IDTypes::Party,
+        party_data: I
+    ) -> Result<
+        (Option<IDTypes::RoundID>, Option<Instant>),
+        StateInitRoundsError<
+            <Types::Rounds as RoundsSetParties<IDTypes>>::SetPartiesError,
+            Types::AdvanceError
+        >
+    >
     where
-        R: RoundsSetParties<PartyData, C>,
-        PartyData: Clone + Eq + Hash,
-        C: Codec<PartyData> {
+        I: Iterator<Item = &'a IDTypes::Party>,
+        IDTypes::Party: 'a,
+        Types::Rounds: RoundsSetParties<IDTypes> {
         let mut guard = self
             .rounds
             .lock()
             .map_err(|_| StateInitRoundsError::MutexPoison)?;
 
         guard
-            .set_parties(codec, self_party, party_data)
+            .set_parties(self_party, party_data)
             .map_err(|err| StateInitRoundsError::Parties { err: err })?;
+
         guard
             .advance()
-            .map_err(|err| StateInitRoundsError::Advance { err: err })?;
-
-        Ok(())
+            .map_err(|err| StateInitRoundsError::Advance { err: err })
     }
 
-    pub(crate) fn recv<Reporter, Msg>(
+    fn add_hashes(
         &self,
-        reporter: &mut Reporter,
-        party: &PartyStreamIdx,
-        msg: Msg
-    ) -> Result<(), WithMutexPoison<R::RecvError<Reporter::ReportError>>>
-    where
-        R: RoundsRecv<RoundID, PartyStreamIdx, Oper, Msg>,
-        Reporter: RoundResultReporter<RoundID, Oper>,
-        Msg: RoundMsg<RoundID> {
-        self.rounds
-            .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?
-            .recv(reporter, party, msg)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
-    }
-
-    #[inline]
-    pub(crate) fn notify(&self) -> Notify {
-        self.notify.clone()
-    }
-
-    pub(crate) fn get_round_msg(
-        &self
-    ) -> Result<Option<ConsensusCtlRound<RoundID, H::HashID, Seal>>, MutexPoison>
-    {
-        self.outbound
-            .lock()
-            .map(|mut queue| queue.pop_back())
-            .map_err(|_| MutexPoison)
-    }
-
-    pub(crate) fn add_hashes(
-        &self,
-        hashes: Vec<H::HashID>
-    ) -> Result<(), WithMutexPoison<R::SubmitError>> {
+        hashes: Vec<Types::HashID>
+    ) -> Result<(), WithMutexPoison<Types::SubmitError>> {
         debug!(target: "consensus-component-state",
                "submitting {} hashes",
                hashes.len());
@@ -264,291 +241,424 @@ where
         self.rounds
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
-            .submit_elems(hashes.into_iter())
-            .map_err(|err| WithMutexPoison::Inner { error: err })?;
-        self.notify
-            .notify()
-            .map_err(|_| WithMutexPoison::MutexPoison)
+            .submit_reqs(hashes.into_iter())
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 
-    pub(crate) fn add_round(
+    fn time_update(
         &self,
-        round: RoundID,
-        hashes: Vec<H::HashID>
-    ) -> Result<(), MutexPoison> {
+        next_time_update: &mut Option<Instant>,
+        now: Instant
+    ) -> Result<bool, WithMutexPoison<Types::TimeUpdateError>> {
         debug!(target: "consensus-component-state",
-               "adding round {} to outbound queue",
-               round);
+                   "checking for time update");
 
-        self.outbound
+        if next_time_update.is_some_and(|when| when <= now) {
+            debug!(target: "consensus-component-state",
+                   "time update for round state");
+
+            *next_time_update = self
+                .rounds
+                .lock()
+                .map_err(|_| WithMutexPoison::MutexPoison)?
+                .time_update()
+                .map_err(|err| WithMutexPoison::Inner { err: err })?;
+
+            if let Some(when) = next_time_update &&
+                now < *when
+            {
+                let duration = *when - now;
+
+                trace!(target: "consensus-component-state",
+                       "next time update in {}.{:03}s",
+                       duration.as_secs(), duration.subsec_millis());
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn recv(
+        &self,
+        party: MulticastStreamIdx,
+        msg: ProtoTypes::Msg,
+    ) -> Result<
+        Option<(
+            IDTypes::RoundID,
+            Types::Oper,
+            Option<IDTypes::RoundID>,
+            Option<Instant>
+        )>,
+        StateRecvError<
+            <Types::Rounds as RoundsRecv<IDTypes, ProtoTypes,
+                                         Types::Oper>>::RecvError,
+            Types::UpdateError,
+            Types::BatchError,
+            Types::AdvanceError
+        >
+    >{
+        trace!(target: "consensus-component-state",
+               "receiving message from {}",
+               party);
+
+        let mut guard = self
+            .rounds
             .lock()
-            .map_err(|_| MutexPoison)?
-            .push_back(ConsensusCtlRound::new(round, hashes, None));
-        self.notify.notify()?;
+            .map_err(|_| StateRecvError::MutexPoison)?;
+
+        if let Some((round, oper)) = guard
+            .recv(&party, msg)
+            .map_err(|err| StateRecvError::Recv { err: err })?
+        {
+            guard
+                .update(&oper)
+                .map_err(|err| StateRecvError::Update { err: err })?;
+
+            let (newround, next_update) = guard
+                .advance()
+                .map_err(|err| StateRecvError::Advance { err: err })?;
+
+            Ok(Some((round, oper, newround, next_update)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl<IDTypes, ProtoTypes, Types> StateThread<IDTypes, ProtoTypes, Types>
+where
+    IDTypes: 'static
+        + PartyTypes
+        + RoundPartyIDTypes<PartyID = MulticastStreamIdx>
+        + Send,
+    IDTypes::Party: for<'a> Deserialize<'a> + Serialize + Send + Sync,
+    IDTypes::RoundID: From<u128> + Into<u128> + Send,
+    ProtoTypes: 'static + ConsensusProtoMsgTypes<IDTypes::RoundID>,
+    ProtoTypes::Msg: Send,
+    Types::Rounds: RoundsRecv<IDTypes, ProtoTypes, Types::Oper>,
+    Types: 'static
+        + ConsensusPeerTypes<IDTypes, ProtoTypes>
+        + ConsensusRecvTypes<IDTypes, ProtoTypes>,
+    Types::Hash: Send
+{
+    pub(crate) fn new(
+        state: State<IDTypes, ProtoTypes, Types>,
+        peers: PeerSessionState<IDTypes, ProtoTypes, Types>,
+        peers_notify: Notify,
+        sender_notify: Notify,
+        mut shutdown: ShutdownFlag,
+        hash: Types::Hash
+    ) -> Result<
+        (
+            Self,
+            Sender<Vec<Types::HashID>>,
+            Sender<(MulticastStreamIdx, ProtoTypes::Msg)>,
+            Notify
+        ),
+        WithMutexPoison<std::io::Error>
+    > {
+        let poll =
+            Poll::new().map_err(|err| WithMutexPoison::Inner { err: err })?;
+        let waker = Waker::new(poll.registry(), WAKER_TOKEN)
+            .map_err(|err| WithMutexPoison::Inner { err: err })?;
+        let waker = Arc::new(waker);
+        let notify = Notify::new(waker);
+        let (round_reqs_send, round_reqs_recv) = channel();
+        let (msgs_send, msgs_recv) = channel();
+
+        shutdown
+            .add_notify(notify.clone())
+            .map_err(|_| WithMutexPoison::MutexPoison)?;
+
+        let thread = StateThread {
+            poll: poll,
+            shutdown: shutdown,
+            round_reqs: round_reqs_recv,
+            sender_notify: sender_notify,
+            msgs: msgs_recv,
+            state: state,
+            peers_notify: peers_notify,
+            peers: peers,
+            hash: hash
+        };
+
+        Ok((thread, round_reqs_send, msgs_send, notify))
+    }
+
+    fn recv(
+        &self,
+        next_time_update: &mut Option<Instant>,
+        party: MulticastStreamIdx,
+        msg: ProtoTypes::Msg,
+    ) -> Result<
+        (),
+        StateRecvError<
+            <Types::Rounds as RoundsRecv<IDTypes, ProtoTypes,
+                                         Types::Oper>>::RecvError,
+            Types::UpdateError,
+            Types::BatchError,
+            Types::AdvanceError
+        >
+    >{
+        if let Some((round, oper, _, next_update)) =
+            self.state.recv(party, msg)?
+        {
+            debug!(target: "consensus-component-state",
+                   "round {} completed, handling results",
+                   round);
+
+            *next_time_update = next_retry(&next_update, next_time_update);
+
+            if let Some(when) = next_time_update {
+                let now = Instant::now();
+                let duration = *when - now;
+
+                trace!(target: "consensus-component-state",
+                       "next time update in {}.{:03}s",
+                       duration.as_secs(), duration.subsec_millis());
+            }
+
+            if let Some(batch) = oper
+                .take_batch(&self.hash)
+                .map_err(|err| StateRecvError::Batch { err: err })?
+            {
+                debug!(target: "consensus-component-state",
+                       "adding round {} to outbound queue",
+                       round);
+
+                let msg = ConsensusCtlRound::new(round, batch, None);
+
+                self.peers
+                    .add_outbound(msg)
+                    .map_err(|_| StateRecvError::MutexPoison)?;
+                self.peers_notify
+                    .notify()
+                    .map_err(|err| StateRecvError::IO { err: err })?
+            }
+        }
+
+        self.sender_notify
+            .notify()
+            .map_err(|err| StateRecvError::IO { err: err })?;
 
         Ok(())
     }
-}
 
-impl<RoundID, Oper> Clone for StateThreadReporter<RoundID, Oper> {
-    #[inline]
-    fn clone(&self) -> Self {
-        StateThreadReporter {
-            send: self.send.clone()
+    fn add_hashes(
+        &self,
+        hashes: Vec<Types::HashID>
+    ) -> Result<(), WithIOError<WithMutexPoison<Types::SubmitError>>> {
+        debug!(target: "consensus-component-state",
+               "submitting {} hashes",
+               hashes.len());
+
+        self.state
+            .add_hashes(hashes)
+            .map_err(|err| WithIOError::Inner { err: err })?;
+        self.sender_notify
+            .notify()
+            .map_err(|err| WithIOError::IO { err: err })
+    }
+
+    fn handle_new_hashes(&mut self) -> bool {
+        loop {
+            debug!(target: "consensus-component-state-thread",
+                   "listening for new hashes");
+
+            match self.round_reqs.try_recv() {
+                Ok(hashes) => {
+                    if let Err(err) = self.add_hashes(hashes) {
+                        error!(target: "consensus-component-state-thread",
+                           "error adding hashes: {}",
+                           err);
+
+                        return false;
+                    }
+                }
+                Err(TryRecvError::Disconnected) => return false,
+                Err(TryRecvError::Empty) => return true
+            }
         }
     }
-}
 
-impl<R, RoundID, H, Seal, Oper> StateThread<R, RoundID, H, Seal, Oper>
-where
-    R: 'static
-        + RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsSubmit<H::HashID>
-        + Send,
-    RoundID: 'static + Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    H: 'static + HashAlgo + Send,
-    H::HashID: 'static + Clone + Display + Hash + HashID + Eq + Send + Sync,
-    Oper: 'static + OperBatch<H> + Send + Sync,
-    Seal: 'static + Send
-{
-    pub(crate) fn create(
-        state: Arc<State<R, RoundID, H, Seal, Oper>>,
-        shutdown: ShutdownFlag,
-        hash: H
-    ) -> (Self, StateThreadReporter<RoundID, Oper>) {
-        let (send, recv) = channel();
+    fn handle_msgs(
+        &mut self,
+        next_time_update: &mut Option<Instant>
+    ) -> bool {
+        loop {
+            debug!(target: "consensus-component-state-thread",
+                   "listening for consensus protocol messages");
 
-        (
-            StateThread {
-                shutdown: shutdown,
-                state: state,
-                recv: recv,
-                hash: hash
-            },
-            StateThreadReporter { send: send }
-        )
+            match self.msgs.try_recv() {
+                Ok((party, msg)) => {
+                    if let Err(err) = self.recv(next_time_update, party, msg) {
+                        error!(target: "consensus-component-state-thread",
+                           "error handling consensus protocol message: {}",
+                           err);
+
+                        return false;
+                    }
+                }
+                Err(TryRecvError::Disconnected) => return false,
+                Err(TryRecvError::Empty) => return true
+            }
+        }
     }
 
-    fn process_one(
+    fn handle_events(
         &mut self,
-        round: RoundID,
-        oper: Oper
-    ) -> (bool, Option<Instant>) {
-        match self.state.rounds.lock() {
-            Ok(mut rounds) => {
-                if let Err(err) = rounds.update(&oper) {
-                    debug!(target: "consensus-component-state-thread",
-                       "error applying state update: {}",
+        events: &mut Events,
+        next: &mut Option<Instant>,
+        next_time_update: &mut Option<Instant>,
+        now: Instant
+    ) -> bool {
+        let mut out = true;
+        let _ = next.take();
+
+        debug!(target: "consensus-component-state-thread",
+               "handling events");
+
+        match self.state.time_update(next_time_update, now) {
+            Ok(notify) => {
+                if notify && let Err(err) = self.sender_notify.notify() {
+                    error!(target: "consensus-component-state-thread",
+                       "error notifying sender: {}",
+                       err);
+                }
+            }
+            Err(err) => {
+                debug!(target: "consensus-component-state-thread",
+                       "error handling time update: {}",
                        err);
 
-                    (false, None)
-                } else {
-                    match oper.take_batch(&self.hash) {
-                        Ok(Some(batch)) => {
-                            if let Err(err) = self.state.add_round(round, batch)
-                            {
-                                error!(target: "consensus-component-state-thread",
-                               "error adding round: {}",
-                               err);
-
-                                (false, None)
-                            } else {
-                                match rounds.advance() {
-                                    Ok(Some((_, deadline))) => {
-                                        if let Err(err) =
-                                            self.state.notify().notify()
-                                        {
-                                            error!(target: "consensus-component-state-thread",
-                                           "error notifying sender: {}",
-                                           err);
-                                        }
-
-                                        (true, deadline)
-                                    }
-                                    // XXX this will go away
-                                    Ok(None) => {
-                                        if let Err(err) =
-                                            self.state.notify().notify()
-                                        {
-                                            error!(target: "consensus-component-state-thread",
-                                           "error notifying sender: {}",
-                                           err);
-                                        }
-
-                                        (true, None)
-                                    }
-                                    Err(err) => {
-                                        error!(target: "consensus-component-state-thread",
-                                       "error advancing to next round: {}",
-                                       err);
-
-                                        (false, None)
-                                    }
-                                }
-                            }
-                        }
-                        Ok(None) => match rounds.advance() {
-                            Ok(Some((_, deadline))) => {
-                                if let Err(err) = self.state.notify().notify() {
-                                    error!(target: "consensus-component-state-thread",
-                                       "error notifying sender: {}",
-                                       err);
-                                }
-
-                                (true, deadline)
-                            }
-                            // XXX this will go away
-                            Ok(None) => {
-                                if let Err(err) = self.state.notify().notify() {
-                                    error!(target: "consensus-component-state-thread",
-                                       "error notifying sender: {}",
-                                       err);
-                                }
-
-                                (true, None)
-                            }
-                            Err(err) => {
-                                error!(target: "consensus-component-state-thread",
-                                   "error advancing to next round: {}",
-                                   err);
-
-                                (false, None)
-                            }
-                        },
-                        Err(err) => {
-                            error!(target: "consensus-component-state-thread",
-                               "error getting hashes for batch: {}",
-                               err);
-
-                            (false, None)
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                error!(target: "consensus-component-state-thread",
-                       "mutex poisoned");
-
-                (false, None)
+                out = false;
             }
         }
-    }
 
-    fn time_update(&mut self) -> (bool, Option<Instant>) {
-        match self.state.rounds.lock() {
-            Ok(mut rounds) => match rounds.time_update() {
-                Ok(deadline) => {
-                    if let Err(err) = self.state.notify().notify() {
-                        error!(target: "consensus-component-state-thread",
-                           "error notifying sender: {}",
-                           err);
+        if events
+            .iter()
+            .map(|event| {
+                let token = event.token();
 
-                        (false, None)
-                    } else {
-                        (true, deadline)
-                    }
-                }
-                Err(err) => {
+                if token != WAKER_TOKEN {
                     error!(target: "consensus-component-state-thread",
-                           "error in time update: {}",
-                           err);
-
-                    (false, None)
+                       "unknown token {}",
+                       token.0);
                 }
-            },
-            Err(_) => {
-                error!(target: "consensus-component-state-thread",
-                       "mutex poisoned");
 
-                (false, None)
-            }
+                token
+            })
+            .any(|token| token == WAKER_TOKEN)
+        {
+            out &= self.handle_new_hashes();
+            out &= self.handle_msgs(next_time_update);
         }
+
+        out
     }
 
-    fn recv_one(
-        &mut self,
-        deadline: Option<Instant>
-    ) -> (bool, Option<Instant>) {
-        if let Some(when) = &deadline {
-            let now = Instant::now();
-
-            if now < *when {
-                let duration = *when - now;
-
-                trace!(target: "consensus-component-state-thread",
-                       "waiting for round result for {}.{:.03}s",
-                       duration.as_secs(),
-                       duration.subsec_millis());
-
-                match self.recv.recv_timeout(duration) {
-                    Ok((round, oper)) => self.process_one(round, oper),
-                    Err(RecvTimeoutError::Timeout) => self.time_update(),
-                    Err(RecvTimeoutError::Disconnected) => {
-                        debug!(target: "consensus-component-state-thread",
-                               "mpsc channel disconnected");
-
-                        (false, None)
-                    }
-                }
-            } else {
-                trace!(target: "consensus-component-state-thread",
-                       "time update deadline expired");
-
-                // Deadline already expired.
-                self.time_update()
-            }
-        } else {
-            trace!(target: "consensus-component-state-thread",
-                   "waiting for round result");
-
-            match self.recv.recv() {
-                Ok((round, oper)) => self.process_one(round, oper),
-                Err(err) => {
-                    debug!(target: "consensus-component-state-thread",
-                           "saw shutdown condition: {}",
-                           err);
-
-                    (false, None)
-                }
-            }
-        }
-    }
-
-    fn run(mut self) {
-        let mut valid = true;
-        let mut deadline = None;
+    fn run(
+        mut self,
+        mut next_time_update: Option<Instant>
+    ) {
+        let mut next = Some(Instant::now());
+        let mut events = Events::with_capacity(1);
+        let mut now;
 
         info!(target: "consensus-component-state-thread",
                "state thread starting");
 
-        while self.shutdown.is_live() && valid {
-            (valid, deadline) = self.recv_one(deadline);
+        while {
+            now = Instant::now();
+            next = next_retry(&next, &next_time_update);
+
+            self.shutdown.is_live() &&
+                (next.is_some_and(|next: Instant| next < now) || {
+                    let duration = next.map(|next| next - now);
+
+                    if let Some(duration) = &duration {
+                        trace!(target: "consensus-component-state-thread",
+                               "waiting for poll for {}.{:03}s",
+                               duration.as_secs(), duration.subsec_millis());
+                    } else {
+                        trace!(target: "consensus-component-state-thread",
+                               "waiting for poll indefinitely");
+                    }
+
+                    self.poll
+                        .poll(&mut events, duration)
+                        .inspect_err(|err| {
+                            error!(target: "poll-thread",
+                                   "error polling: {}",
+                                   err)
+                        })
+                        .is_ok()
+                }) &&
+                self.handle_events(
+                    &mut events,
+                    &mut next,
+                    &mut next_time_update,
+                    now
+                )
+        } {}
+
+        if let Err(err) = self.shutdown.set() {
+            error!(target: "consensus-component-state-thread",
+                   "error setting shutdown: {}",
+                   err)
         }
 
         info!(target: "consensus-component-state-thread",
                "state thread exiting")
     }
 
-    pub(crate) fn start(self) -> JoinHandle<()> {
-        spawn(move || self.run())
+    pub(crate) fn start(
+        self,
+        next_time_update: Option<Instant>
+    ) -> Result<JoinHandle<()>, std::io::Error> {
+        Builder::new()
+            .name(String::from("consensus-state-thread"))
+            .spawn(move || self.run(next_time_update))
     }
 }
 
-impl<RoundID, Oper> RoundResultReporter<RoundID, Oper>
-    for StateThreadReporter<RoundID, Oper>
+impl<Inner> Display for WithIOError<Inner>
 where
-    RoundID: Send,
-    Oper: Send + Sync
+    Inner: Display
 {
-    type ReportError = SendError<(RoundID, Oper)>;
-
-    fn report(
+    fn fmt(
         &self,
-        round: RoundID,
-        oper: Oper
-    ) -> Result<(), Self::ReportError> {
-        self.send.send((round, oper))
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            WithIOError::Inner { err } => err.fmt(f),
+            WithIOError::IO { err } => err.fmt(f)
+        }
+    }
+}
+
+impl<Recv, Update, Batch, Advance> Display
+    for StateRecvError<Recv, Update, Batch, Advance>
+where
+    Recv: Display,
+    Batch: Display,
+    Update: Display,
+    Advance: Display
+{
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            StateRecvError::IO { err } => err.fmt(f),
+            StateRecvError::Recv { err } => err.fmt(f),
+            StateRecvError::Batch { err } => err.fmt(f),
+            StateRecvError::Update { err } => err.fmt(f),
+            StateRecvError::Advance { err } => err.fmt(f),
+            StateRecvError::MutexPoison => write!(f, "mutex poisoned")
+        }
     }
 }
 

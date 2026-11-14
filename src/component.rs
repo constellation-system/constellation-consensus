@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -16,113 +16,52 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+#[cfg(feature = "standalone")]
 use std::convert::Infallible;
-use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
 use std::hash::Hash;
-use std::marker::PhantomData;
-use std::net::SocketAddr;
-use std::str::from_utf8;
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 #[cfg(feature = "standalone")]
 use clap::ArgMatches;
-use constellation_auth::authn::SessionAuthN;
-use constellation_auth::authn::TestAuthN;
-use constellation_auth::config::TestCredConfig;
-use constellation_auth::cred::SSLCred;
-use constellation_channels::config::ChannelRegistryChannelsConfig;
-use constellation_channels::config::CompoundFarEndpoint;
-use constellation_channels::config::ResolverConfig;
-use constellation_channels::far::compound::CompoundFarChannel;
-use constellation_channels::far::compound::CompoundFarChannelSessionCred;
-use constellation_channels::far::compound::CompoundFarChannelThreadedFlows;
-use constellation_channels::far::compound::CompoundFarChannelXfrm;
-use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
-use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
-use constellation_channels::far::flows::OwnedFlowNegotiator;
-use constellation_channels::far::flows::OwnedFlowsCreate;
-use constellation_channels::far::flows::ThreadedFlowsListener;
-#[cfg(feature = "standalone")]
-use constellation_channels::far::registry::CompoundFarChannelRegistry;
-use constellation_channels::far::registry::FarChannelRegistryCtx;
-use constellation_channels::far::registry::FarChannelRegistryID;
-use constellation_channels::far::udp::UDPDatagramXfrm;
-use constellation_channels::far::unix::UnixDatagramXfrm;
-use constellation_channels::far::FarChannelAcquiredResolve;
-use constellation_channels::far::FarChannelCreate;
-use constellation_channels::far::FarChannelOwnedFlows;
 use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_channels::resolve::cache::ThreadedNSNameCaches;
-use constellation_channels::resolve::MixedResolver;
-use constellation_channels::unix::UnixSocketAddr;
-use constellation_common::codec::Codec;
-use constellation_common::codec::DatagramCodec;
-use constellation_common::error::ErrorScope;
-use constellation_common::error::ScopedError;
-use constellation_common::hashid::HashAlgo;
-use constellation_common::hashid::SHA3Algo;
-use constellation_common::ids::AscendingCount;
-use constellation_common::ids::IDGen;
-use constellation_common::net::DatagramXfrm;
-use constellation_common::net::DatagramXfrmCreate;
-use constellation_common::net::IPEndpointAddr;
-use constellation_common::net::SharedMsgs;
-use constellation_common::net::Socket;
-use constellation_common::sched::DenseItemID;
+use constellation_common::config::Create;
+use constellation_common::error::WithMutexPoison;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::version::FullVersion;
 use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
-use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBus;
-use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCleanup;
+use constellation_component_common::bus::dispatch::DispatchLargeObjBus;
+use constellation_component_common::bus::dispatch::DispatchLargeObjBusStarter;
 use constellation_component_common::bus::multicast::MulticastDatagramBus;
-use constellation_component_common::bus::multicast::MulticastDatagramBusCleanup;
-use constellation_component_common::config::DispatchLargeObjBusConfig;
-use constellation_component_common::config::PartiesConfig;
-use constellation_component_common::consensus_ctl::ConsensusCtl;
-use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
-use constellation_component_common::PartyStreamIdx;
-use constellation_consensus_common::oper::OperBatch;
-use constellation_consensus_common::parties::StaticParties;
+use constellation_component_common::bus::multicast::MulticastDatagramBusStarter;
 use constellation_consensus_common::proto::ConsensusProto;
-use constellation_consensus_common::proto::ConsensusProtoRounds;
-use constellation_consensus_common::proto::SharedConsensusProto;
-use constellation_consensus_common::round::RoundsSubmit;
-use constellation_consensus_common::state::ProtoState;
-#[cfg(feature = "standalone")]
-use constellation_pbft::msgs::PBFTMsgPERCodec;
-#[cfg(feature = "standalone")]
-use constellation_pbft::proto::PBFTProto;
 #[cfg(feature = "standalone")]
 use constellation_standalone::Standalone;
 #[cfg(feature = "standalone")]
 use constellation_standalone::StandaloneService;
-use constellation_streams::addrs::Addrs;
-use constellation_streams::addrs::AddrsCreate;
-use constellation_streams::channels::ChannelParam;
-use constellation_streams::config::LargeObjProtoConfig;
-use constellation_streams::error::ErrorReportInfo;
-use constellation_streams::large_obj::LargeObjID;
-use constellation_streams::stream::ConcurrentStream;
-use constellation_streams::stream::StreamID;
+use constellation_streams::multicast::MulticastStreamIdx;
+use constellation_streams::threads::poll::PollThreadStartError;
 use log::debug;
 use log::error;
 use log::info;
-use log::warn;
 
-use crate::config::ConsensusConfig;
+use crate::config::ConsensusComponentConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
 use crate::peers::PeerSessionDispatch;
+use crate::peers::PeerSessionState;
 use crate::recv::ConsensusAuthNRecv;
 use crate::state::State;
-use crate::state::StateMsgs;
+use crate::state::StateInitRoundsError;
 use crate::state::StateThread;
+use crate::types::ConsensusTypes;
 
 /// Index used to identify parties in a given round.
 ///
@@ -134,185 +73,58 @@ pub struct PartyRoundIdx(usize);
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StringPrincipalCodec;
 
-pub type CompoundConsensusComponent<
-    Ctx,
-    RoundIDs,
-    Epochs,
-    Proto,
-    MsgCodec,
-    H,
-    LargeObjIDs,
-    PrinCodec
-> = ConsensusComponent<
-    RoundIDs,
-    Proto,
-    MsgCodec,
-    H,
-    LargeObjIDs,
-    Epochs,
-    CompoundFarChannel,
-    CompoundFarChannelThreadedFlows<
-        Arc<TestAuthN<String, TestCred>>,
-        UnixDatagramXfrm,
-        UDPDatagramXfrm,
-        FarChannelRegistryID
-    >,
-    Arc<TestAuthN<String, TestCred>>,
-    CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
-    Ctx,
-    MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>,
-    PrinCodec,
-    CompoundFarEndpoint
->;
-
-pub struct ConsensusComponent<
-    RoundIDs,
-    Proto,
-    MsgCodec,
-    H,
-    LargeObjIDs,
-    Epochs,
-    Channel,
-    F,
-    AuthN,
-    Xfrm,
-    Ctx,
-    Resolver,
-    PrinCodec,
-    Endpoint
-> where
-    RoundIDs: 'static + Iterator + Send,
-    RoundIDs::Item: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Epochs: 'static + IDGen + Iterator + Send,
-    Epochs::Item: Clone + Default + Display + Ord + Send,
-    Epochs::Config: Clone + Send,
-    Proto: ConsensusProto<AuthN::Prin, PrinCodec>
-        + ConsensusProtoRounds<
-            RoundIDs,
-            PartyStreamIdx,
-            AuthN::Prin,
-            PrinCodec,
-            StaticParties<PartyStreamIdx>
-        > + Send,
-    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper:
-        OperBatch<H> + Send + Sync,
-    Proto::Rounds: SharedMsgs<PartyStreamIdx, Proto::Msg>
-        + RoundsSubmit<H::HashID> + Send,
-    Proto::Msg: Clone + Debug + Send,
-    Proto::Out: Send,
-    AuthN: Clone
-        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
-        + Send
-        + Sync,
-    AuthN::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
-    MsgCodec: Clone + DatagramCodec<Proto::Msg> + Send,
-    <MsgCodec as Codec<Proto::Msg>>::Param: Default,
-    <MsgCodec as Codec<Proto::Msg>>::EncodeError:
-        ErrorReportInfo<DenseItemID<usize>>,
-    LargeObjIDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
-    LargeObjIDs::Config: Clone,
-    H: 'static + Clone + Default + HashAlgo + Send,
-    H::HashID: 'static + Clone + Display + Hash + Eq + Send + Sync,
-    Channel:
-        FarChannelOwnedFlows<F, AuthN, Xfrm> + FarChannelCreate + Send + Sync,
-    Channel::Acquired: FarChannelAcquiredResolve<Resolved = Channel::Param>,
-    Channel::Param: 'static
-        + Clone
-        + Display
-        + Eq
-        + Hash
-        + PartialEq
-        + ChannelParam<<Channel::Xfrm as DatagramXfrm>::PeerAddr>
-        + Send
-        + Sync,
-    Channel::Acquired:
-        FarChannelAcquiredResolve<Resolved = Channel::Param> + Send + Sync,
-    <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow:
-        ConcurrentStream + Send,
-    <Channel::Xfrm as DatagramXfrm>::PeerAddr: Eq + Hash + Send + Sync,
-    F: OwnedFlowsCreate<Channel::Socket, Channel::Nego, AuthN, Channel::Xfrm>
-        + Send,
-    F::Flow: 'static + ConcurrentStream + Send,
-    F::CreateParam: Clone + Default + Send + Sync,
-    F::Reporter: Clone + Send + Sync,
-    F::ChannelID: From<usize> + Into<usize> + Send + Sync,
-    Xfrm:
-        DatagramXfrm + DatagramXfrmCreate<Addr = Channel::Param> + Send + Sync,
-    Xfrm::CreateParam: Clone + Default + Send + Sync,
-    Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
-    Ctx: 'static + Clone
-        + FarChannelRegistryCtx<Channel, F, AuthN, Xfrm>
-        + NSNameCachesCtx
-        + Send
-        + Sync,
-    Ctx::NameCaches: NSNameCachesCtx,
-    PrinCodec: Clone + Codec<AuthN::Prin> + Send,
-    PrinCodec::Param: Default,
-    Endpoint: 'static + Send,
-    Resolver: 'static
-        + Addrs<Addr = <Channel::Xfrm as DatagramXfrm>::PeerAddr>
-        + AddrsCreate<Ctx, Vec<Endpoint>, Config = ResolverConfig>
-        + Send
-        + Sync,
-    Resolver::Origin: 'static
-        + Clone
-        + Eq
-        + Hash
-        + Into<Option<IPEndpointAddr>>
-        + Send
-        + Sync {
-    channel: PhantomData<Channel>,
-    proto: PhantomData<Proto>,
-    flow: PhantomData<F>,
-    xfrm: PhantomData<Xfrm>,
-    resolver: PhantomData<Resolver>,
-    round_ids: RoundIDs,
-    consensus_config: ConsensusConfig<
-        AuthN::Prin,
-        PrinCodec::Param,
-        Proto::Config,
-        ChannelRegistryChannelsConfig<MsgCodec::Param>,
-        Epochs::Config,
-        Endpoint
-    >,
-    consensus_listener: ThreadedFlowsListener<
-        <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
-        StreamID<
-            <Channel::Xfrm as DatagramXfrm>::PeerAddr,
-            F::ChannelID,
-            Channel::Param
-        >,
-        AuthN::Prin
-    >,
-    peers_large_obj_config: LargeObjProtoConfig<
-        <ConsensusCtlCodec<RoundIDs::Item, H, TestSeal, TestSealCodec> as Codec<
-             ConsensusCtl<RoundIDs::Item, H::HashID, TestSeal>
-        >>::Param,
-        LargeObjIDs::Config
-    >,
-    peers_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
-    peers_listener: ThreadedFlowsListener<
-        <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
-        StreamID<
-            <Channel::Xfrm as DatagramXfrm>::PeerAddr,
-            F::ChannelID,
-            Channel::Param
-        >,
-        AuthN::Prin
-    >,
-    shutdown: ShutdownFlag,
-    consensus_ctx: Ctx,
-    peers_ctx: Ctx
+pub struct ConsensusComponent<Types>
+where
+    Types: 'static + ConsensusTypes + Send {
+    state: State<Types::IDTypes, Types::ProtoTypes, Types>,
+    state_thread: StateThread<Types::IDTypes, Types::ProtoTypes, Types>,
+    consensus:
+        MulticastDatagramBusStarter<Types::ConsensusBusTypes, Types::Ctx>,
+    consensus_recv:
+        ConsensusAuthNRecv<Types::IDTypes, Types::ProtoTypes, Types>,
+    peers: DispatchLargeObjBusStarter<Types::PeerBusTypes, Types::Ctx>,
+    peers_dispatch:
+        PeerSessionDispatch<Types::IDTypes, Types::ProtoTypes, Types>,
+    time_update: Option<Instant>
 }
 
-pub struct ConsensusComponentCleanup {
-    shutdown: ShutdownFlag,
-    multicast: MulticastDatagramBusCleanup,
-    peers: DispatchLargeObjBusCleanup,
+pub struct ConsensusComponentCleanup<Types>
+where
+    Types: 'static + ConsensusTypes + Send {
+    consensus_join: MulticastDatagramBus<Types::ConsensusBusTypes, Types::Ctx>,
+    peers_join: DispatchLargeObjBus<Types::PeerBusTypes, Types::Ctx>,
     state_join: JoinHandle<()>
 }
 
-pub struct ConsensusComponentRunError;
+pub struct ConsensusComponentErrorCleanup<Types>
+where
+    Types: 'static + ConsensusTypes + Send {
+    shutdown: ShutdownFlag,
+    peers_join: Option<DispatchLargeObjBus<Types::PeerBusTypes, Types::Ctx>>,
+    state_join: Option<JoinHandle<()>>
+}
+
+pub enum ConsensusComponentCreateError<
+    RoundIDs,
+    Hash,
+    Consensus,
+    Rounds,
+    Parties
+> {
+    RoundIDs { err: RoundIDs },
+    Hash { err: Hash },
+    Consensus { err: Consensus },
+    Rounds { err: Rounds },
+    Parties { err: Parties },
+    IO { err: std::io::Error },
+    MutexPoison
+}
+
+pub enum ConsensusComponentRunError {
+    Poll { err: PollThreadStartError },
+    IO { err: std::io::Error },
+    MutexPoison
+}
 
 impl From<usize> for PartyRoundIdx {
     #[inline]
@@ -328,350 +140,322 @@ impl From<PartyRoundIdx> for usize {
     }
 }
 
-impl<
-        RoundIDs,
-        Proto,
-        MsgCodec,
-        H,
-        LargeObjIDs,
-        Epochs,
-        Channel,
-        F,
-        AuthN,
-        Xfrm,
-        Ctx,
-        Resolver,
-        PrinCodec,
-        Endpoint
-    >
-    ConsensusComponent<
-        RoundIDs,
-        Proto,
-        MsgCodec,
-        H,
-        LargeObjIDs,
-        Epochs,
-        Channel,
-        F,
-        AuthN,
-        Xfrm,
-        Ctx,
-        Resolver,
-        PrinCodec,
-        Endpoint
-    >
+impl<Types> ConsensusComponent<Types>
 where
-    RoundIDs: 'static + Iterator + Send,
-    RoundIDs::Item: Clone + Display + From<u128> + Into<u128> + Ord + Send,
-    Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
-    Epochs::Config: Clone + Send,
-    AuthN: 'static
-        + Clone
-        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
-        + Send
-        + Sync,
-    AuthN::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
-    MsgCodec: 'static + Clone + DatagramCodec<Proto::Msg> + Send,
-    <MsgCodec as Codec<Proto::Msg>>::Param: Default,
-    <MsgCodec as Codec<Proto::Msg>>::EncodeError:
-        ErrorReportInfo<DenseItemID<usize>>,
-    LargeObjIDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
-    LargeObjIDs::Config: Clone,
-    H: 'static + Clone + Default + HashAlgo + Send,
-    H::HashID: 'static + Clone + Display + Hash + Eq + Send + Sync,
-    Channel: 'static
-        + FarChannelOwnedFlows<F, AuthN, Xfrm>
-        + FarChannelCreate
-        + Send
-        + Sync,
-    Channel::Acquired: FarChannelAcquiredResolve<Resolved = Channel::Param>,
-    Channel::Param: 'static
-        + Clone
-        + Display
-        + Eq
-        + Hash
-        + PartialEq
-        + ChannelParam<<Channel::Xfrm as DatagramXfrm>::PeerAddr>
-        + Send
-        + Sync,
-    Channel::Acquired:
-        FarChannelAcquiredResolve<Resolved = Channel::Param> + Send + Sync,
-    <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow:
-        ConcurrentStream + Send,
-    <Channel::Xfrm as DatagramXfrm>::PeerAddr: Eq + Hash + Send + Sync,
-    F: 'static,
-    F: OwnedFlowsCreate<Channel::Socket, Channel::Nego, AuthN, Channel::Xfrm>
-        + Send,
-    F::Flow: 'static + ConcurrentStream + Send,
-    F::CreateParam: Clone + Default + Send + Sync,
-    F::Reporter: Clone + Send + Sync,
-    F::ChannelID: From<usize> + Into<usize> + Send + Sync,
-    Xfrm: 'static
-        + DatagramXfrm
-        + DatagramXfrmCreate<Addr = Channel::Param>
-        + Send
-        + Sync,
-    Xfrm::CreateParam: Clone + Default + Send + Sync,
-    Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
-    Proto: ConsensusProto<AuthN::Prin, PrinCodec>
-        + ConsensusProtoRounds<
-            RoundIDs,
-            PartyStreamIdx,
-            AuthN::Prin,
-            PrinCodec,
-            StaticParties<PartyStreamIdx>
-        > + Send,
-    <Proto::State as ProtoState<RoundIDs::Item, PartyStreamIdx>>::Oper:
-        'static + OperBatch<H> + Send + Sync,
-    Proto::Rounds: 'static
-        + SharedMsgs<PartyStreamIdx, Proto::Msg>
-        + RoundsSubmit<H::HashID>
-        + Send,
-    Proto::Msg: 'static + Clone + Debug + Send,
-    Proto::Out: 'static + Send,
-    Ctx: 'static
-        + Clone
-        + FarChannelRegistryCtx<Channel, F, AuthN, Xfrm>
-        + NSNameCachesCtx
-        + Send
-        + Sync,
-    Ctx::NameCaches: NSNameCachesCtx,
-    PrinCodec: Clone + Codec<AuthN::Prin> + Send,
-    PrinCodec::Param: Default,
-    Endpoint: 'static + Send,
-    Resolver: 'static
-        + Addrs<Addr = <Channel::Xfrm as DatagramXfrm>::PeerAddr>
-        + AddrsCreate<Ctx, Vec<Endpoint>, Config = ResolverConfig>
-        + Send
-        + Sync,
-    Resolver::Origin: 'static
-        + Clone
-        + Eq
-        + Hash
-        + Into<Option<IPEndpointAddr>>
-        + Send
-        + Sync
+    Types: ConsensusTypes + Send
 {
-    pub fn start(
-        self
-    ) -> Result<ConsensusComponentCleanup, ConsensusComponentRunError> {
-        let ConsensusComponent {
-            consensus_config,
-            consensus_listener,
-            peers_large_obj_config,
-            peers_comm_config,
-            peers_listener,
-            consensus_ctx,
-            peers_ctx,
-            shutdown,
-            round_ids,
-            ..
-        } = self;
-
+    pub fn create(
+        config: ConsensusComponentConfig<
+            Types::RoundIDsConfig,
+            Types::ConsensusConfig,
+            Types::Prin,
+            Types::HashConfig,
+            Types::ConsensusSessAuthConfig,
+            Types::ConsensusUnixConfig,
+            Types::ConsensusUDPConfig,
+            Types::ConsensusEncoderConfig,
+            Types::ConsensusDecoderConfig,
+            Types::ResolverConfig,
+            Types::ConsensusEpochsConfig,
+            Types::ConsensusMsgAuthConfig,
+            Types::PeerHashConfig,
+            Types::PeerSessAuthConfig,
+            Types::PeerMsgAuthConfig,
+            Types::PeerProtoAuthConfig,
+            Types::PeerUnixConfig,
+            Types::PeerUDPConfig,
+            Types::IDsConfig,
+            Types::PeerEpochsConfig
+        >,
+        ctx: Types::Ctx,
+        shutdown: &ShutdownFlag
+    ) -> Result<
+        Self,
+        ConsensusComponentCreateError<
+            Types::RoundIDsCreateError,
+            Types::HashCreateError,
+            Types::ConsensusCreateError,
+            Types::ConsensusRoundsError,
+            StateInitRoundsError<Types::SetPartiesError, Types::AdvanceError>
+        >
+    > {
         info!(target: "consensus-component",
               "starting consensus component");
 
-        let (proto_config, self_party, prin_codec_param, multicast_config) =
-            consensus_config.take();
-        let prin_codec = match PrinCodec::create(prin_codec_param) {
-            Ok(codec) => codec,
-            Err(err) => {
-                error!(target: "consensus-component",
-                       "error creating principal codec: {}",
-                       err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
-        let proto: SharedConsensusProto<
-            Proto,
-            RoundIDs,
-            PartyStreamIdx,
-            AuthN::Prin,
-            PrinCodec,
-            StaticParties<PartyStreamIdx>
-        > = match SharedConsensusProto::create(proto_config, prin_codec.clone())
-        {
-            Ok(proto) => proto,
-            Err(err) => {
-                error!(target: "consensus-component",
-                           "error creating consensus protocol: {}",
-                           err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
-        let rounds = match proto.rounds(round_ids) {
-            Ok(proto) => proto,
-            Err(err) => {
-                error!(target: "consensus-component",
-                           "error creating consensus protocol rounds: {}",
-                           err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
+        let (
+            round_ids_config,
+            hash_config,
+            proto_config,
+            consensus_config,
+            peers_config
+        ) = config.take();
+        // XXX Hacky and wrong way to set parties
+        let self_party = consensus_config.self_party().clone();
+        let parties: Vec<(MulticastStreamIdx, Types::Prin)> = consensus_config
+            .thread()
+            .stream()
+            .parties()
+            .iter()
+            .filter(|party| party.party() != &self_party)
+            .enumerate()
+            .map(|(i, party)| {
+                (MulticastStreamIdx::from(i), party.party().clone())
+            })
+            .collect();
+        let round_ids =
+            Types::RoundIDs::create(round_ids_config).map_err(|err| {
+                ConsensusComponentCreateError::RoundIDs { err: err }
+            })?;
+        let hash = Types::Hash::create(hash_config)
+            .map_err(|err| ConsensusComponentCreateError::Hash { err: err })?;
+        let proto = Types::Consensus::create(proto_config).map_err(|err| {
+            ConsensusComponentCreateError::Consensus { err: err }
+        })?;
+        let rounds = proto.rounds(round_ids).map_err(|err| {
+            ConsensusComponentCreateError::Rounds { err: err }
+        })?;
+        let (peers, peers_notify) =
+            DispatchLargeObjBusStarter::create(peers_config, ctx.clone())
+                .map_err(|err| ConsensusComponentCreateError::IO {
+                    err: err
+                })?;
+        let (consensus, consensus_notify) =
+            MulticastDatagramBusStarter::create(consensus_config, ctx.clone())
+                .map_err(|err| ConsensusComponentCreateError::IO {
+                    err: err
+                })?;
+        // XXX use size hints.
+        let peer_state = PeerSessionState::new();
         let state = State::new(rounds);
-        let state = Arc::new(state);
-        let peer_dispatch =
-            PeerSessionDispatch::new(peers_large_obj_config, state.clone());
-        let peers_comm: DispatchLargeObjBus<
-            ConsensusCtl<RoundIDs::Item, H::HashID, TestSeal>,
-            ConsensusCtl<RoundIDs::Item, H::HashID, TestSeal>,
-            ConsensusCtlCodec<RoundIDs::Item, H, TestSeal, TestSealCodec>,
-            H,
-            LargeObjIDs,
-            _,
-            _,
-            _,
-            Epochs,
-            _,
-            _,
-            _,
-            _,
-            Resolver,
-            Endpoint,
-            _,
-            _
-        > = match DispatchLargeObjBus::create(
-            peers_comm_config,
-            peer_dispatch,
-            peers_listener,
-            shutdown.clone(),
-            peers_ctx
-        ) {
-            Ok(peer_comm) => peer_comm,
-            Err(err) => {
-                error!(target: "consensus-component",
-                           "error creating peer dispatch comm: {}",
-                           err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
-
-        let notify = state.notify();
-        let (state_thread, round_reporter) =
-            StateThread::create(state.clone(), shutdown.clone(), H::default());
-        let mut authn_msg_recv = ConsensusAuthNRecv::create(
-            round_reporter,
-            state.clone(),
-            notify.clone()
-        );
-        let multicast: MulticastDatagramBus<
-            _,
-            MsgCodec,
-            _,
-            _,
-            Epochs,
-            _,
-            _,
-            _,
-            _,
-            Resolver,
-            _,
-            _
-        > = match MulticastDatagramBus::create(
-            Some(self_party.clone()),
-            multicast_config,
-            consensus_listener,
-            consensus_ctx,
-            shutdown.clone(),
-            notify,
-            authn_msg_recv.clone(),
-            StateMsgs::from(state.clone())
-        ) {
-            Ok(multicast) => multicast,
-            Err(err) => {
-                error!(target: "consensus-component",
-                           "error creating consensus multicast comm: {}",
-                           err);
-
-                return Err(ConsensusComponentRunError);
-            }
-        };
-        let party_data = match multicast.parties() {
-            Ok(parties) => {
-                let mut parties: Vec<(PartyStreamIdx, AuthN::Prin)> =
-                    parties.collect();
-
-                parties.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-
-                let mut party_data = Vec::with_capacity(parties.len());
-
-                for (idx, party) in parties.into_iter() {
-                    let idx: usize = idx.into();
-
-                    if idx == party_data.len() {
-                        party_data.push(party)
-                    } else {
-                        error!(target: "consensus-component",
-                               "stream parties skipped an index");
-
-                        return Err(ConsensusComponentRunError);
-                    }
+        let (state_thread, peers_sender, consensus_sender, state_notify) =
+            StateThread::new(
+                state.clone(),
+                peer_state.clone(),
+                peers_notify,
+                consensus_notify,
+                shutdown.clone(),
+                hash
+            )
+            .map_err(|err| match err {
+                WithMutexPoison::Inner { err } => {
+                    ConsensusComponentCreateError::IO { err: err }
                 }
+                WithMutexPoison::MutexPoison => {
+                    ConsensusComponentCreateError::MutexPoison
+                }
+            })?;
+        let peers_dispatch = PeerSessionDispatch::new(
+            peers_sender,
+            state_notify.clone(),
+            peer_state
+        );
+        let mut consensus_recv =
+            ConsensusAuthNRecv::create(consensus_sender, state_notify.clone());
+        let (_, time_update) = state
+            .init_rounds(self_party, parties.iter().map(|(_, id)| id))
+            .map_err(|err| ConsensusComponentCreateError::Parties {
+                err: err
+            })?;
 
-                party_data
-            }
-        };
+        consensus_recv
+            .set_parties(parties.into_iter())
+            .map_err(|_| ConsensusComponentCreateError::MutexPoison)?;
 
-        if let Err(err) = state.init_rounds(prin_codec, self_party, &party_data)
-        {
-            error!("error setting parties: {}", err);
+        Ok(ConsensusComponent {
+            state: state,
+            state_thread: state_thread,
+            consensus: consensus,
+            consensus_recv: consensus_recv,
+            peers_dispatch: peers_dispatch,
+            time_update: time_update,
+            peers: peers
+        })
+    }
 
-            return Err(ConsensusComponentRunError);
-        }
+    pub fn start(
+        self,
+        shutdown: ShutdownFlag
+    ) -> Result<
+        ConsensusComponentCleanup<Types>,
+        (
+            ConsensusComponentErrorCleanup<Types>,
+            ConsensusComponentRunError
+        )
+    > {
+        info!(target: "consensus-component",
+              "starting consensus component");
 
-        let Ok(party_iter) = multicast.parties();
-        if let Err(err) = authn_msg_recv.set_parties(party_iter) {
-            error!("error setting parties: {}", err);
-        }
+        let ConsensusComponent {
+            state_thread,
+            state,
+            consensus,
+            consensus_recv,
+            peers,
+            peers_dispatch,
+            time_update
+        } = self;
 
-        let state_join = state_thread.start();
+        match state_thread.start(time_update) {
+            Ok(state_join) => match peers
+                .start(peers_dispatch, shutdown.clone())
+            {
+                Ok(peers_join) => match consensus.start(
+                    consensus_recv,
+                    state,
+                    shutdown.clone()
+                ) {
+                    Ok(consensus_join) => Ok(ConsensusComponentCleanup {
+                        consensus_join: consensus_join,
+                        peers_join: peers_join,
+                        state_join: state_join
+                    }),
+                    Err(err) => {
+                        let cleanup = ConsensusComponentErrorCleanup {
+                            shutdown: shutdown.clone(),
+                            peers_join: Some(peers_join),
+                            state_join: Some(state_join)
+                        };
+                        let err = ConsensusComponentRunError::Poll { err: err };
 
-        debug!(target: "consensus-component",
-               "starting multicaster");
-
-        match multicast.start() {
-            Ok(multicast_cleanup) => match peers_comm.start() {
-                Ok(peers_cleanup) => Ok(ConsensusComponentCleanup {
-                    shutdown: shutdown,
-                    multicast: multicast_cleanup,
-                    peers: peers_cleanup,
-                    state_join: state_join
-                }),
+                        Err((cleanup, err))
+                    }
+                },
                 Err(err) => {
-                    error!("error starting peers bus: {}", err);
+                    let cleanup = ConsensusComponentErrorCleanup {
+                        shutdown: shutdown.clone(),
+                        peers_join: None,
+                        state_join: Some(state_join)
+                    };
+                    let err = match err {
+                        WithMutexPoison::Inner { err } => {
+                            ConsensusComponentRunError::IO { err: err }
+                        }
+                        WithMutexPoison::MutexPoison => {
+                            ConsensusComponentRunError::MutexPoison
+                        }
+                    };
 
-                    Err(ConsensusComponentRunError)
+                    Err((cleanup, err))
                 }
             },
             Err(err) => {
-                error!("error starting multicast bus: {}", err);
+                let cleanup = ConsensusComponentErrorCleanup {
+                    shutdown: shutdown.clone(),
+                    peers_join: None,
+                    state_join: None
+                };
 
-                Err(ConsensusComponentRunError)
+                Err((cleanup, ConsensusComponentRunError::IO { err: err }))
             }
         }
     }
 }
 
-impl ConsensusComponentCleanup {
-    pub fn cleanup(mut self) {
-        self.shutdown.set();
-        self.multicast.cleanup();
-        self.peers.cleanup();
+impl<Types> ConsensusComponentCleanup<Types>
+where
+    Types: ConsensusTypes + Send
+{
+    pub fn cleanup(self) {
+        let ConsensusComponentCleanup {
+            consensus_join,
+            peers_join,
+            state_join,
+            ..
+        } = self;
+
+        consensus_join.cleanup();
+        peers_join.cleanup();
 
         debug!(target: "consensus-component-cleanup",
                "joining state thread");
 
-        if self.state_join.join().is_err() {
-            error!(target: "consensus-component-cleanup",
-                   "error joining state thread")
+        if state_join.join().is_err() {
+            error!(target: "consensus-standalone-shutdown",
+                   "error joining peers thread")
         }
+    }
+}
 
-        debug!(target: "consensus-component-cleanup",
-               "all threads joined");
+impl<Types> ConsensusComponentErrorCleanup<Types>
+where
+    Types: ConsensusTypes + Send
+{
+    pub fn cleanup(self) {
+        debug!(target: "consensus-standalone",
+               "cleaning up consensus");
+
+        let ConsensusComponentErrorCleanup {
+            mut shutdown,
+            peers_join,
+            state_join
+        } = self;
+
+        if let Err(err) = shutdown.set() {
+            error!(target: "consensus-standalone-shutdown",
+                   "error setting shutdown flag: {}",
+                   err)
+        } else {
+            if let Some(peers) = peers_join {
+                peers.cleanup()
+            }
+
+            if let Some(state) = state_join &&
+                state.join().is_err()
+            {
+                error!(target: "consensus-standalone-shutdown",
+                           "error joining peers thread")
+            }
+        }
+    }
+}
+
+impl<RoundIDs, Hash, Consensus, Rounds, Parties> Display
+    for ConsensusComponentCreateError<
+        RoundIDs,
+        Hash,
+        Consensus,
+        Rounds,
+        Parties
+    >
+where
+    RoundIDs: Display,
+    Parties: Display,
+    Hash: Display,
+    Consensus: Display,
+    Rounds: Display
+{
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            ConsensusComponentCreateError::RoundIDs { err } => err.fmt(f),
+            ConsensusComponentCreateError::Parties { err } => err.fmt(f),
+            ConsensusComponentCreateError::Hash { err } => err.fmt(f),
+            ConsensusComponentCreateError::Consensus { err } => err.fmt(f),
+            ConsensusComponentCreateError::Rounds { err } => {
+                write!(f, "{}", err)
+            }
+            ConsensusComponentCreateError::IO { err } => write!(f, "{}", err),
+            ConsensusComponentCreateError::MutexPoison => {
+                write!(f, "mutex poisoned")
+            }
+        }
+    }
+}
+
+impl Display for ConsensusComponentRunError {
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            ConsensusComponentRunError::Poll { err } => write!(f, "{}", err),
+            ConsensusComponentRunError::IO { err } => write!(f, "{}", err),
+            ConsensusComponentRunError::MutexPoison => {
+                write!(f, "mutex poisoned")
+            }
+        }
     }
 }
 
@@ -682,18 +466,14 @@ pub struct StandaloneCreateCleanup {
 }
 
 #[cfg(feature = "standalone")]
-pub type StandaloneRegistry = CompoundFarChannelRegistry<
-    Arc<TestAuthN<String, TestCred>>,
-    UnixDatagramXfrm,
-    UDPDatagramXfrm,
-    FarChannelRegistryID
->;
+pub struct StandaloneCreateErrorCleanup {
+    caches: Option<StandaloneCreateCleanup>
+}
 
 #[cfg(feature = "standalone")]
 #[derive(Clone)]
 pub struct StandaloneCtx {
-    caches: ThreadedNSNameCaches,
-    registry: Arc<StandaloneRegistry>
+    caches: ThreadedNSNameCaches
 }
 
 #[cfg(feature = "standalone")]
@@ -708,42 +488,33 @@ impl NSNameCachesCtx for StandaloneCtx {
 }
 
 #[cfg(feature = "standalone")]
-impl
-    FarChannelRegistryCtx<
-        CompoundFarChannel,
-        CompoundFarChannelThreadedFlows<
-            Arc<TestAuthN<String, TestCred>>,
-            UnixDatagramXfrm,
-            UDPDatagramXfrm,
-            FarChannelRegistryID
-        >,
-        Arc<TestAuthN<String, TestCred>>,
-        CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>
-    > for StandaloneCtx
+impl<Types> Standalone for ConsensusComponent<Types>
+where
+    Types: ConsensusTypes<Prin = String, Ctx = StandaloneCtx> + Send
 {
-    #[inline]
-    fn far_channel_registry(&mut self) -> Arc<StandaloneRegistry> {
-        self.registry.clone()
-    }
-}
-
-// ISSUE #2: AscendingCount is temporary, and will be replaced with a random
-// number stream.
-#[cfg(feature = "standalone")]
-impl Standalone
-    for CompoundConsensusComponent<
-        StandaloneCtx,
-        AscendingCount<u128>,
-        AscendingCount<u128>,
-        PBFTProto<SHA3Algo, AscendingCount<u128>, String>,
-        PBFTMsgPERCodec,
-        SHA3Algo,
-        AscendingCount<LargeObjID>,
-        StringPrincipalCodec
-    >
-{
-    type Config = StandaloneConfig;
+    type Config = StandaloneConfig<
+        Types::RoundIDsConfig,
+        Types::ConsensusConfig,
+        Types::HashConfig,
+        Types::ConsensusSessAuthConfig,
+        Types::ConsensusUnixConfig,
+        Types::ConsensusUDPConfig,
+        Types::ConsensusEncoderConfig,
+        Types::ConsensusDecoderConfig,
+        Types::ResolverConfig,
+        Types::ConsensusEpochsConfig,
+        Types::ConsensusMsgAuthConfig,
+        Types::PeerHashConfig,
+        Types::PeerSessAuthConfig,
+        Types::PeerMsgAuthConfig,
+        Types::PeerProtoAuthConfig,
+        Types::PeerUnixConfig,
+        Types::PeerUDPConfig,
+        Types::IDsConfig,
+        Types::PeerEpochsConfig
+    >;
     type CreateCleanup = StandaloneCreateCleanup;
+    type CreateErrorCleanup = StandaloneCreateErrorCleanup;
 
     const CONFIG_FILES: &[&str] = &["consensus.conf"];
     const NAME: &str = "consensus";
@@ -753,430 +524,503 @@ impl Standalone
         Some(VersionSuffix::Development)
     );
 
+    fn cleanup_create_err(create: Self::CreateErrorCleanup) {
+        if let Some(cleanup) = create.caches {
+            let StandaloneCreateCleanup {
+                caches_join,
+                mut shutdown
+            } = cleanup;
+
+            debug!(target: "processor",
+                   "cleaning up caches");
+
+            if let Err(err) = shutdown.set() {
+                error!(target: "one-shot",
+                       "error setting shutdown flag: {}",
+                       err)
+            } else if caches_join.join().is_err() {
+                error!(target: "one-shot",
+                       "error shutting down name chache threads")
+            }
+        }
+    }
+
     fn create(
         _args: ArgMatches,
-        config: Self::Config
-    ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
+        config: Self::Config,
+        shutdown: &ShutdownFlag
+    ) -> Result<(Self, Self::CreateCleanup), Self::CreateErrorCleanup> {
         let (name_caches_config, component_config) = config.take();
-        let (consensus_config, consensus_registry_config, peers_config) =
-            component_config.take();
-        let (
-            peers_registry_config,
-            peers_comm_config,
-            peers_large_obj_config,
-            peers_authn_config
-        ) = peers_config.take();
-        let shutdown = ShutdownFlag::new();
-        let (mut caches, caches_join) =
-            ThreadedNSNameCaches::create(name_caches_config, shutdown.clone());
+        let (caches, caches_join) =
+            ThreadedNSNameCaches::create(name_caches_config, shutdown.clone())
+                .map_err(|err| {
+                    error!(target: "processor-standalone",
+                       "error creating name caches: {}",
+                       err);
+
+                    StandaloneCreateErrorCleanup { caches: None }
+                })?;
+        let ctx = StandaloneCtx { caches: caches };
         let cleanup = StandaloneCreateCleanup {
             shutdown: shutdown.clone(),
             caches_join: caches_join
         };
-        let (consensus_listener, consensus_reporter) =
-            ThreadedFlowsListener::new();
-        let (peers_listener, peers_reporter) = ThreadedFlowsListener::new();
 
-        // ISSUE #6: This part is temporary, until we get a real
-        // authenticator.
-        let multicast_config = consensus_config.multicast();
-        let parties_config = multicast_config.parties();
-        let authn_parties = match parties_config {
-            PartiesConfig::Static { stat } => {
-                let mut authn_parties = Vec::with_capacity(stat.len());
-
-                for party in stat {
-                    let id = party.party();
-
-                    for conn in party.party_config().connections() {
-                        for endpoint in conn.endpoints() {
-                            match endpoint {
-                                CompoundFarEndpoint::Unix { unix_datagram } => {
-                                    match UnixSocketAddr::try_from(
-                                        unix_datagram
-                                    ) {
-                                        Ok(addr) => {
-                                            let cred =
-                                                TestCred::Unix { addr: addr };
-
-                                            authn_parties
-                                                .push((cred, id.clone()));
-                                        }
-                                        Err(err) => {
-                                            warn!(target: "start",
-                                              "error converting path: {}",
-                                              err);
-                                        }
-                                    }
-                                }
-                                CompoundFarEndpoint::UDP { udp } => match udp
-                                    .ip_endpoint()
-                                {
-                                    IPEndpointAddr::Addr(addr) => {
-                                        let addr =
-                                            SocketAddr::new(*addr, udp.port());
-                                        let cred = TestCred::IP { addr: addr };
-
-                                        authn_parties.push((cred, id.clone()));
-                                    }
-                                    IPEndpointAddr::Name(name) => {
-                                        warn!(target: "start",
-                                               "discarding endpoint {}",
-                                               name);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                authn_parties
-            }
-        };
-        let consensus_authn =
-            Arc::new(TestAuthN::from_parties(authn_parties.into_iter()));
-
-        let consensus_registry = match StandaloneRegistry::create(
-            &mut caches,
-            consensus_authn,
-            consensus_reporter,
-            consensus_registry_config
-        ) {
-            Ok(registry) => registry,
+        match ConsensusComponent::create(component_config, ctx, shutdown) {
+            Ok(out) => Ok((out, cleanup)),
             Err(err) => {
-                error!(target: "start",
-                       "error creating channel registry: {}",
+                error!(target: "consensus-standalone",
+                       "error creating component: {}",
                        err);
 
-                return Err(cleanup);
+                Err(StandaloneCreateErrorCleanup {
+                    caches: Some(cleanup)
+                })
             }
-        };
-        let peers_authn = match TestAuthN::create(peers_authn_config) {
-            Ok(peers_authn) => peers_authn,
-            Err(err) => {
-                error!(target: "start",
-                       "error creating authn: {}",
-                       err);
-
-                return Err(cleanup);
-            }
-        };
-        let peers_authn = Arc::new(peers_authn);
-        let peers_registry = match StandaloneRegistry::create(
-            &mut caches,
-            peers_authn,
-            peers_reporter,
-            peers_registry_config
-        ) {
-            Ok(registry) => registry,
-            Err(err) => {
-                error!(target: "start",
-                       "error creating channel registry: {}",
-                       err);
-
-                return Err(cleanup);
-            }
-        };
-        let consensus_ctx = StandaloneCtx {
-            registry: Arc::new(consensus_registry),
-            caches: caches.clone()
-        };
-        let peers_ctx = StandaloneCtx {
-            registry: Arc::new(peers_registry),
-            caches: caches
-        };
-        let round_ids = AscendingCount::default();
-        let standalone = ConsensusComponent {
-            channel: PhantomData,
-            resolver: PhantomData,
-            proto: PhantomData,
-            xfrm: PhantomData,
-            flow: PhantomData,
-            round_ids: round_ids,
-            consensus_config: consensus_config,
-            consensus_listener: consensus_listener,
-            peers_large_obj_config: peers_large_obj_config,
-            peers_comm_config: peers_comm_config,
-            peers_listener: peers_listener,
-            shutdown: shutdown,
-            consensus_ctx: consensus_ctx,
-            peers_ctx: peers_ctx
-        };
-
-        Ok((standalone, cleanup))
+        }
     }
 }
 
-impl StandaloneService
-    for CompoundConsensusComponent<
-        StandaloneCtx,
-        AscendingCount<u128>,
-        AscendingCount<u128>,
-        PBFTProto<SHA3Algo, AscendingCount<u128>, String>,
-        PBFTMsgPERCodec,
-        SHA3Algo,
-        AscendingCount<LargeObjID>,
-        StringPrincipalCodec
-    >
+#[cfg(feature = "standalone")]
+impl<Types> StandaloneService for ConsensusComponent<Types>
+where
+    Types: ConsensusTypes<Prin = String, Ctx = StandaloneCtx> + Send
 {
-    type RunCleanup = ConsensusComponentCleanup;
-    type RunErrorCleanup = ();
+    type RunCleanup = ConsensusComponentCleanup<Types>;
+    type RunErrorCleanup = ConsensusComponentErrorCleanup<Types>;
 
-    fn run(self) -> Result<Self::RunCleanup, Self::RunErrorCleanup> {
-        match self.start() {
-            Ok(out) => Ok(out),
-            Err(err) => {
-                error!(target: "consensus-component",
-                       "{}", err);
+    const DEFAULT_PIDFILE: &str = "/tmp/constellation-consensus.pid";
 
-                Err(())
-            }
-        }
+    fn run(
+        self,
+        _rundir: PathBuf,
+        shutdown: ShutdownFlag
+    ) -> Result<Self::RunCleanup, Self::RunErrorCleanup> {
+        self.start(shutdown).map_err(|(cleanup, err)| {
+            error!(target: "consensus-standalone",
+                       "error running component: {}",
+                       err);
+
+            cleanup
+        })
     }
 
-    fn shutdown(
-        mut create_cleanup: Self::CreateCleanup,
-        run_cleanup: Option<Self::RunCleanup>
+    fn join(
+        create_cleanup: Self::CreateCleanup,
+        run_cleanup: Self::RunCleanup
     ) {
-        debug!(target: "consensus-standalone",
-               "cleaning up consensus");
-
-        create_cleanup.shutdown.set();
-
-        if let Some(cleanup) = run_cleanup {
-            debug!(target: "consensus-standalone",
-               "cleaning up runtime");
-
-            cleanup.cleanup();
-        }
-
-        debug!(target: "consensus-standalone",
-               "cleaning up caches");
+        run_cleanup.cleanup();
 
         if create_cleanup.caches_join.join().is_err() {
-            error!(target: "standalone-shutdown",
+            error!(target: "consensus-standalone-shutdown",
                    "error shutting down name chache threads")
         }
     }
 
     fn shutdown_err(
         mut create_cleanup: Self::CreateCleanup,
-        _run_cleanup: ()
+        run_cleanup: Self::RunErrorCleanup
     ) {
-        debug!(target: "consensus-standalone",
-               "cleaning up consensus");
+        run_cleanup.cleanup();
 
-        create_cleanup.shutdown.set();
-
-        if create_cleanup.caches_join.join().is_err() {
-            error!(target: "standalone-shutdown",
+        if let Err(err) = create_cleanup.shutdown.set() {
+            error!(target: "consensus-standalone-shutdown",
+                   "error setting shutdown flag: {}",
+                   err)
+        } else if create_cleanup.caches_join.join().is_err() {
+            error!(target: "consensus-standalone-shutdown",
                    "error shutting down name chache threads")
         }
     }
 }
 
-pub struct StringPrincipalDecodeError;
+#[cfg(feature = "standalone")]
+use std::net::SocketAddr;
 
-impl Display for StringPrincipalDecodeError {
-    #[inline]
-    fn fmt(
-        &self,
-        f: &mut Formatter<'_>
-    ) -> Result<(), Error> {
-        write!(f, "UTF-8 error")
-    }
+#[cfg(feature = "standalone")]
+use constellation_auth::authn::BasicAuthNed;
+#[cfg(feature = "standalone")]
+use constellation_auth::authn::PassthruMsgAuthN;
+#[cfg(feature = "standalone")]
+use constellation_auth::authn::basic::BasicAuthN;
+#[cfg(feature = "standalone")]
+use constellation_auth::config::BasicAuthNConfig;
+#[cfg(feature = "standalone")]
+use constellation_channels::config::CompoundFarChannelXfrmPeerAddr;
+#[cfg(feature = "standalone")]
+use constellation_channels::config::CompoundFarEndpoint;
+#[cfg(feature = "standalone")]
+use constellation_channels::config::ResolverConfig;
+#[cfg(feature = "standalone")]
+use constellation_channels::far::compound::CompoundFlow;
+#[cfg(feature = "standalone")]
+use constellation_channels::far::types::CompoundFarChannelsBasicAuthNedDatagramChan;
+#[cfg(feature = "standalone")]
+use constellation_channels::far::types::CompoundFarChannelsBasicAuthNedLargeObjChan;
+#[cfg(feature = "standalone")]
+use constellation_channels::resolve::MixedResolver;
+#[cfg(feature = "standalone")]
+use constellation_common::codec::test::TestDecodeError;
+#[cfg(feature = "standalone")]
+use constellation_common::codec::test::TestStringCodec;
+#[cfg(feature = "standalone")]
+use constellation_common::codec::test::TooShort;
+#[cfg(feature = "standalone")]
+use constellation_common::hashid::SHA3Algo;
+#[cfg(feature = "standalone")]
+use constellation_common::hashid::SHA3ID;
+#[cfg(feature = "standalone")]
+use constellation_common::ids::AscendingCount;
+#[cfg(feature = "standalone")]
+use constellation_common::net::PassthruDatagramXfrm;
+#[cfg(feature = "standalone")]
+use constellation_common::net::PassthruDatagramXfrmParam;
+#[cfg(feature = "standalone")]
+use constellation_common::unix::UnixSocketPath;
+#[cfg(feature = "standalone")]
+use constellation_component_common::bus::types::DispatchLargeObjBusTypes;
+#[cfg(feature = "standalone")]
+use constellation_component_common::bus::types::MulticastDatagramBusTypes;
+#[cfg(feature = "standalone")]
+use constellation_component_common::consensus_ctl::ConsensusCtl;
+#[cfg(feature = "standalone")]
+use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
+#[cfg(feature = "standalone")]
+use constellation_component_common::consensus_ctl::ConsensusCtlRoundEncodeError;
+#[cfg(feature = "standalone")]
+use constellation_component_common::xact::test::TestSeal;
+#[cfg(feature = "standalone")]
+use constellation_component_common::xact::test::TestSealCodec;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::parties::PartyTypes;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::parties::RoundIDGenTypes;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::parties::RoundPartyIDTypes;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::parties::RoundPartyIdxTypes;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::round::SingleRound;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::round::SingleRoundAdvanceError;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::round::SingleRoundCreateError;
+#[cfg(feature = "standalone")]
+use constellation_consensus_common::round::SingleRoundSubmitError;
+#[cfg(feature = "standalone")]
+use constellation_pbft::config::PBFTConfig;
+#[cfg(feature = "standalone")]
+use constellation_pbft::msgs::PBFTMsgPERCodec;
+#[cfg(feature = "standalone")]
+use constellation_pbft::msgs::PbftMsg;
+#[cfg(feature = "standalone")]
+use constellation_pbft::msgs::PbftRequest;
+#[cfg(feature = "standalone")]
+use constellation_pbft::proto::OutboundPartyIdx;
+#[cfg(feature = "standalone")]
+use constellation_pbft::proto::PBFTProto;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTBatchError;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTProtoState;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTProtoStateUpdateError;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTProtoTypes;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTRoundResult;
+#[cfg(feature = "standalone")]
+use constellation_pbft::state::PBFTRoundStateCreateError;
+#[cfg(feature = "standalone")]
+use constellation_streams::large_obj::LargeObjID;
+#[cfg(feature = "standalone")]
+use constellation_streams::large_obj::LargeObjMsg;
+
+#[cfg(feature = "standalone")]
+use crate::peers::PeerSessionDispatchTypes;
+#[cfg(feature = "standalone")]
+use crate::peers::PeerSessionMsgs;
+#[cfg(feature = "standalone")]
+use crate::peers::PeerSessionRecv;
+#[cfg(feature = "standalone")]
+use crate::peers::PeerSessionRecvError;
+#[cfg(feature = "standalone")]
+use crate::types::ConsensusBaseTypes;
+#[cfg(feature = "standalone")]
+use crate::types::ConsensusMsgTypes;
+#[cfg(feature = "standalone")]
+use crate::types::ConsensusPeerTypes;
+#[cfg(feature = "standalone")]
+use crate::types::ConsensusRecvTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandaloneConsensusTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandaloneConsensusBusTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandalonePeerBusTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandalonePBFTIDTypes;
+
+#[cfg(feature = "standalone")]
+pub struct StandalonePBFTTypes;
+
+#[cfg(feature = "standalone")]
+pub type StandaloneConsensusComponent =
+    ConsensusComponent<StandaloneConsensusTypes>;
+
+#[cfg(feature = "standalone")]
+impl RoundPartyIDTypes for StandalonePBFTIDTypes {
+    type PartyID = MulticastStreamIdx;
+    type RoundID = u128;
 }
 
-impl ScopedError for StringPrincipalDecodeError {
-    fn scope(&self) -> ErrorScope {
-        ErrorScope::Unrecoverable
-    }
+#[cfg(feature = "standalone")]
+impl RoundPartyIdxTypes for StandalonePBFTIDTypes {
+    type PartyRoundIdx = OutboundPartyIdx;
 }
 
-impl Codec<String> for StringPrincipalCodec {
-    type CreateError = Infallible;
-    type DecodeError = StringPrincipalDecodeError;
-    type EncodeError = Infallible;
-    type Param = ();
-
-    #[inline]
-    fn create(_param: Self::Param) -> Result<Self, Self::CreateError> {
-        Ok(StringPrincipalCodec)
-    }
-
-    #[inline]
-    fn buf_size(
-        &self,
-        val: &String
-    ) -> usize {
-        val.as_bytes().len()
-    }
-
-    fn decode(
-        &mut self,
-        buf: &[u8]
-    ) -> Result<(String, usize), Self::DecodeError> {
-        let len = buf.len();
-        let string = from_utf8(buf)
-            .map_err(|_| StringPrincipalDecodeError)?
-            .to_string();
-
-        Ok((string, len))
-    }
-
-    fn encode(
-        &mut self,
-        val: &String,
-        buf: &mut [u8]
-    ) -> Result<usize, Self::EncodeError> {
-        let bytes = val.as_bytes();
-        let len = bytes.len();
-
-        buf.copy_from_slice(bytes);
-
-        Ok(len)
-    }
-
-    fn encode_to_vec(
-        &mut self,
-        val: &String
-    ) -> Result<Vec<u8>, Self::EncodeError> {
-        Ok(val.as_bytes().to_vec())
-    }
+#[cfg(feature = "standalone")]
+impl RoundIDGenTypes for StandalonePBFTIDTypes {
+    type RoundIDs = AscendingCount<u128>;
 }
 
-impl Display for ConsensusComponentRunError {
-    fn fmt(
-        &self,
-        f: &mut Formatter<'_>
-    ) -> Result<(), Error> {
-        write!(f, "failed to start consensus component")
-    }
+#[cfg(feature = "standalone")]
+impl PartyTypes for StandalonePBFTIDTypes {
+    type DecodeError = TestDecodeError;
+    type EncodeError = TooShort;
+    type Party = String;
+    type PartyCodec = TestStringCodec;
+    type PartyCodecConfig = ();
+    type PartyCodecCreateError = Infallible;
 }
 
-// ISSUE #2: Delete from here
-
-#[derive(Clone, Debug)]
-pub struct TestSeal;
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum TestCred {
-    IP { addr: SocketAddr },
-    Unix { addr: UnixSocketAddr }
+#[cfg(feature = "standalone")]
+impl ConsensusBaseTypes for StandaloneConsensusTypes {
+    type BatchError = PBFTBatchError;
+    type Hash = SHA3Algo;
+    type HashConfig = ();
+    type HashCreateError = Infallible;
+    type HashID = SHA3ID;
+    type Oper = PBFTRoundResult<PbftRequest>;
+    type Seal = TestSeal;
+    type SealCodec = TestSealCodec;
+    type SealCodecCreateError = Infallible;
+    type SealCodecParam = ();
 }
 
-#[derive(Clone)]
-pub struct TestSealCodec;
-
-impl TryFrom<TestCredConfig> for TestCred {
-    type Error = std::io::Error;
-
-    #[inline]
-    fn try_from(val: TestCredConfig) -> Result<TestCred, Self::Error> {
-        match val {
-            TestCredConfig::Unix { unix } => {
-                let addr = UnixSocketAddr::try_from(unix)?;
-
-                Ok(TestCred::Unix { addr: addr })
-            }
-            TestCredConfig::IP { ip } => Ok(TestCred::IP { addr: ip })
-        }
-    }
-}
-
-impl Codec<TestSeal> for TestSealCodec {
-    type CreateError = Infallible;
-    type DecodeError = Infallible;
-    type EncodeError = Infallible;
-    type Param = ();
-
-    #[inline]
-    fn create(_param: ()) -> Result<Self, Infallible> {
-        Ok(TestSealCodec)
-    }
-
-    #[inline]
-    fn buf_size(
-        &self,
-        _val: &TestSeal
-    ) -> usize {
-        0
-    }
-
-    #[inline]
-    fn encode(
-        &mut self,
-        _val: &TestSeal,
-        _buf: &mut [u8]
-    ) -> Result<usize, Self::EncodeError> {
-        Ok(0)
-    }
-
-    #[inline]
-    fn decode(
-        &mut self,
-        _buf: &[u8]
-    ) -> Result<(TestSeal, usize), Self::DecodeError> {
-        Ok((TestSeal, 0))
-    }
-}
-
-impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>> for TestCred
-where
-    TestCred: From<Basic>
+#[cfg(feature = "standalone")]
+impl ConsensusMsgTypes<StandalonePBFTIDTypes, PBFTProtoTypes>
+    for StandaloneConsensusTypes
 {
-    fn from(_val: SSLCred<CompoundFarChannelSessionCred<Basic>>) -> TestCred {
-        panic!("Not supported!")
-    }
+    type AuthNMsg = BasicAuthNed<String, PbftMsg>;
 }
 
-impl From<CompoundFarIPChannelXfrmPeerAddr> for TestCred {
-    fn from(val: CompoundFarIPChannelXfrmPeerAddr) -> TestCred {
-        match val {
-            CompoundFarIPChannelXfrmPeerAddr::UDP { udp } => {
-                TestCred::IP { addr: udp }
-            }
-            _ => panic!("Not supported!")
-        }
-    }
-}
-
-impl From<CompoundFarChannelXfrmPeerAddr> for TestCred {
-    fn from(val: CompoundFarChannelXfrmPeerAddr) -> TestCred {
-        match val {
-            CompoundFarChannelXfrmPeerAddr::Unix { unix } => {
-                TestCred::Unix { addr: unix }
-            }
-            CompoundFarChannelXfrmPeerAddr::IP { ip } => TestCred::from(ip)
-        }
-    }
-}
-
-impl<Basic> From<CompoundFarChannelSessionCred<Basic>> for TestCred
-where
-    TestCred: From<Basic>
+#[cfg(feature = "standalone")]
+impl ConsensusRecvTypes<StandalonePBFTIDTypes, PBFTProtoTypes>
+    for StandaloneConsensusTypes
 {
-    fn from(val: CompoundFarChannelSessionCred<Basic>) -> TestCred {
-        match val {
-            CompoundFarChannelSessionCred::Basic { basic } => {
-                TestCred::from(basic)
-            }
-            _ => panic!("Not supported!")
-        }
-    }
+    type AdvanceError =
+        SingleRoundAdvanceError<PBFTRoundStateCreateError<MulticastStreamIdx>>;
+    type Rounds = SingleRound<
+        PBFTProtoState<SHA3Algo, MulticastStreamIdx>,
+        StandalonePBFTIDTypes,
+        PBFTProtoTypes
+    >;
+    type SetPartiesError = TooShort;
+    type SubmitError = SingleRoundSubmitError<Infallible, Infallible>;
+    type TimeUpdateError = Infallible;
+    type UpdateError = PBFTProtoStateUpdateError<SHA3ID>;
 }
 
-impl Display for TestCred {
-    #[inline]
-    fn fmt(
-        &self,
-        f: &mut Formatter<'_>
-    ) -> Result<(), Error> {
-        match self {
-            TestCred::IP { addr } => write!(f, "ip://{}", addr),
-            TestCred::Unix { addr } => write!(f, "unix://{}", addr)
-        }
-    }
+#[cfg(feature = "standalone")]
+impl ConsensusPeerTypes<StandalonePBFTIDTypes, PBFTProtoTypes>
+    for StandaloneConsensusTypes
+{
+    type CtlAuthNMsg =
+        BasicAuthNed<String, ConsensusCtl<u128, SHA3ID, TestSeal>>;
+    type IDs = AscendingCount<LargeObjID>;
+    type IDsConfig = ();
+    type IDsCreateError = Infallible;
+    type PeerPrin = String;
 }
 
-// ISSUE #2: to here
+#[cfg(feature = "standalone")]
+impl ConsensusTypes for StandaloneConsensusTypes {
+    type Consensus = PBFTProto<SHA3Algo, StandalonePBFTIDTypes>;
+    type ConsensusBusTypes = StandaloneConsensusBusTypes;
+    type ConsensusConfig = PBFTConfig<()>;
+    type ConsensusCreateError = Infallible;
+    type ConsensusDecoderConfig = ();
+    type ConsensusEncoderConfig = ();
+    type ConsensusEpochsConfig = ();
+    type ConsensusMsgAuthConfig = ();
+    type ConsensusRoundsError = SingleRoundCreateError<
+        Infallible,
+        Infallible,
+        PBFTRoundStateCreateError<MulticastStreamIdx>
+    >;
+    type ConsensusSessAuthConfig = BasicAuthNConfig<String>;
+    type ConsensusUDPConfig = PassthruDatagramXfrmParam;
+    type ConsensusUnixConfig = PassthruDatagramXfrmParam;
+    type Ctx = StandaloneCtx;
+    type IDTypes = StandalonePBFTIDTypes;
+    type Msg = PbftMsg;
+    type PeerBusTypes = StandalonePeerBusTypes;
+    type PeerEpochsConfig = ();
+    type PeerHashConfig = ();
+    type PeerMsgAuthConfig = ();
+    type PeerProtoAuthConfig = ();
+    type PeerSessAuthConfig = BasicAuthNConfig<String>;
+    type PeerUDPConfig = PassthruDatagramXfrmParam;
+    type PeerUnixConfig = PassthruDatagramXfrmParam;
+    type Prin = String;
+    type ProtoTypes = PBFTProtoTypes;
+    type ResolverConfig = ResolverConfig;
+    type RoundID = u128;
+    type RoundIDs = AscendingCount<u128>;
+    type RoundIDsConfig = ();
+    type RoundIDsCreateError = Infallible;
+}
+
+#[cfg(feature = "standalone")]
+impl DispatchLargeObjBusTypes<StandaloneCtx> for StandalonePeerBusTypes {
+    type AuthNChan = CompoundFarChannelsBasicAuthNedLargeObjChan<
+        String,
+        SHA3Algo,
+        PassthruDatagramXfrm<UnixSocketPath>,
+        PassthruDatagramXfrm<SocketAddr>
+    >;
+    type AuthNMsg = BasicAuthNed<String, ConsensusCtl<u128, SHA3ID, TestSeal>>;
+    type AuthNSession = BasicAuthNed<
+        String,
+        CompoundFlow<
+            PassthruDatagramXfrm<UnixSocketPath>,
+            PassthruDatagramXfrm<SocketAddr>
+        >
+    >;
+    type Decoder = ConsensusCtlCodec<u128, SHA3Algo, TestSeal, TestSealCodec>;
+    type DecoderConfig = ();
+    type DecoderCreateError = Infallible;
+    type DispTypes = PeerSessionDispatchTypes<
+        StandalonePBFTIDTypes,
+        PBFTProtoTypes,
+        StandaloneConsensusTypes
+    >;
+    type EncodeError =
+        ConsensusCtlRoundEncodeError<asn1rs::io::per::err::Error, Infallible>;
+    type Encoder = ConsensusCtlCodec<u128, SHA3Algo, TestSeal, TestSealCodec>;
+    type EncoderConfig = ();
+    type EncoderCreateError = Infallible;
+    type Epoch = u128;
+    type Epochs = AscendingCount<u128>;
+    type EpochsConfig = ();
+    type EpochsCreateError = Infallible;
+    type Hash = SHA3Algo;
+    type HashConfig = ();
+    type HashCreateError = Infallible;
+    type HashID = SHA3ID;
+    type IDs = AscendingCount<LargeObjID>;
+    type IDsConfig = ();
+    type IDsCreateError = Infallible;
+    type InMsg = ConsensusCtl<u128, SHA3ID, TestSeal>;
+    type LargeObjAuthNMsg = BasicAuthNed<String, LargeObjMsg<SHA3ID>>;
+    type LargeObjMsgAuth = PassthruMsgAuthN<LargeObjMsg<SHA3ID>, String>;
+    type LargeObjMsgAuthConfig = ();
+    type LargeObjMsgAuthCreateError = Infallible;
+    type LargeObjWrapper = LargeObjMsg<SHA3ID>;
+    type MsgAuth =
+        PassthruMsgAuthN<ConsensusCtl<u128, SHA3ID, TestSeal>, String>;
+    type MsgAuthConfig = ();
+    type MsgAuthCreateError = Infallible;
+    type MsgAuthError = Infallible;
+    type MsgPrin = String;
+    type Msgs = PeerSessionMsgs<
+        StandalonePBFTIDTypes,
+        PBFTProtoTypes,
+        StandaloneConsensusTypes
+    >;
+    type Origin = CompoundFarEndpoint;
+    type OutMsg = ConsensusCtl<u128, SHA3ID, TestSeal>;
+    type Recv = PeerSessionRecv<
+        StandalonePBFTIDTypes,
+        PBFTProtoTypes,
+        StandaloneConsensusTypes
+    >;
+    type RecvError = PeerSessionRecvError<SHA3ID>;
+    type Resolver =
+        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>;
+    type ResolverConfig = ResolverConfig;
+    type SessionAuth = BasicAuthN<String>;
+    type SessionAuthConfig = BasicAuthNConfig<String>;
+    type SessionAuthNError = Infallible;
+    type SessionPrin = String;
+    type UDP = PassthruDatagramXfrm<SocketAddr>;
+    type UDPConfig = PassthruDatagramXfrmParam;
+    type UDPError = Infallible;
+    type Unix = PassthruDatagramXfrm<UnixSocketPath>;
+    type UnixConfig = PassthruDatagramXfrmParam;
+    type UnixError = Infallible;
+    type Wrapper = ConsensusCtl<u128, SHA3ID, TestSeal>;
+}
+
+#[cfg(feature = "standalone")]
+impl MulticastDatagramBusTypes<StandaloneCtx> for StandaloneConsensusBusTypes {
+    type AuthNChan = CompoundFarChannelsBasicAuthNedDatagramChan<
+        String,
+        PbftMsg,
+        PbftMsg,
+        PassthruDatagramXfrm<UnixSocketPath>,
+        PassthruDatagramXfrm<SocketAddr>,
+        PBFTMsgPERCodec,
+        PBFTMsgPERCodec
+    >;
+    type AuthNMsg = BasicAuthNed<String, PbftMsg>;
+    type AuthNSession = BasicAuthNed<
+        String,
+        CompoundFlow<
+            PassthruDatagramXfrm<UnixSocketPath>,
+            PassthruDatagramXfrm<SocketAddr>
+        >
+    >;
+    type Decoder = PBFTMsgPERCodec;
+    type DecoderConfig = ();
+    type DecoderCreateError = Infallible;
+    type EncodeError = asn1rs::io::per::err::Error;
+    type Encoder = PBFTMsgPERCodec;
+    type EncoderConfig = ();
+    type EncoderCreateError = Infallible;
+    type Epoch = u128;
+    type Epochs = AscendingCount<u128>;
+    type EpochsConfig = ();
+    type InMsg = PbftMsg;
+    type MsgAuth = PassthruMsgAuthN<PbftMsg, String>;
+    type MsgAuthConfig = ();
+    type MsgPrin = String;
+    type Msgs =
+        State<StandalonePBFTIDTypes, PBFTProtoTypes, StandaloneConsensusTypes>;
+    type Origin = CompoundFarEndpoint;
+    type OutMsg = PbftMsg;
+    type Recv = ConsensusAuthNRecv<
+        StandalonePBFTIDTypes,
+        PBFTProtoTypes,
+        StandaloneConsensusTypes
+    >;
+    type Resolver =
+        MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>;
+    type ResolverConfig = ResolverConfig;
+    type SessionAuth = BasicAuthN<String>;
+    type SessionAuthConfig = BasicAuthNConfig<String>;
+    type SessionAuthNError = Infallible;
+    type SessionPrin = String;
+    type UDP = PassthruDatagramXfrm<SocketAddr>;
+    type UDPConfig = PassthruDatagramXfrmParam;
+    type UDPError = Infallible;
+    type Unix = PassthruDatagramXfrm<UnixSocketPath>;
+    type UnixConfig = PassthruDatagramXfrmParam;
+    type UnixError = Infallible;
+    type Wrapper = PbftMsg;
+}
